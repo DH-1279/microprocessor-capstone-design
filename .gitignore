@@ -1,0 +1,49 @@
+# Secrets and local environment
+.env
+.env.*
+!.env.example
+.venv/
+venv/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# IDE and OS files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Private company data and captured images
+data/raw/
+data/private/
+datasets/
+captures/
+logs/
+
+# Trained models and TensorRT artifacts
+*.pt
+*.pth
+*.onnx
+*.engine
+*.plan
+
+# Local databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Course handouts and administrative forms
+/1주차이론_교체.pdf
+/캡스톤디자인 관련 설명자료.pdf
+/(붙임2) 2026학년도 2학기 IC-PBL 캡스톤디자인 안내/
+
+# Build and temporary outputs
+build/
+dist/
+tmp/
+*.log
