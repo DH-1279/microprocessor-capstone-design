@@ -43,7 +43,7 @@ python3 -m haptic_mvp simulate --report reports/simulation.json
 
 **이 프로젝트는 AI HAT+ 2 사용이 확정되어 있습니다.** HAT 배송 전에는 앞의 가상 입력 시뮬레이션으로 흐름을 확인하고, 환경·모델을 미리 준비합니다. 이 준비 과정에 CPU용 YOLO 설치는 필요하지 않습니다. `config/cpu.json`과 별도 CPU 실행 안내는 선택적인 대체 경로이며 기본 실행 절차에 포함하지 않습니다.
 
-기준 환경은 **Pi 5 + Raspberry Pi OS Trixie 64-bit + AI HAT+ 2(Hailo-10H)**입니다. 현재 설치된 OS는 아직 확인하지 않았으므로 먼저 `cat /etc/os-release`, `uname -m`, `python3 --version`으로 확인합니다.
+기준 환경은 **Pi 5 + Raspberry Pi OS Trixie 64-bit + AI HAT+ 2(Hailo-10H)**입니다. 9월 19일 사용자 설치 로그에서 Trixie·ARM64·Python 3.13 환경과 기본 라이브러리 설치를 확인했습니다. Pi 시뮬레이션 6개도 통과했으며, SDK import와 실제 장치 통합 실행은 추가 확인이 필요합니다. 자세한 결과는 [오늘의 구현·검증 기록](../docs/2026-09-19_Raspberry_Pi_MVP_구현_검증.md)에 있습니다.
 
 1. [카메라·AI HAT 준비](VISION_SETUP.md)를 따라 Hailo-10H 드라이버, 카메라 패키지, 가상환경, YOLO HEF와 손 추적 모델을 준비합니다.
 2. [마이크·스피커 준비](AUDIO_SETUP.md)를 따라 Whisper와 다국어 `tiny` 모델을 설치하고 녹음·재생을 각각 확인합니다.
