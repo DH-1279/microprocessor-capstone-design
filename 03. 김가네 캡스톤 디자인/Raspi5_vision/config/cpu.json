@@ -1,0 +1,6 @@
+{
+  "vision": {
+    "detector": "ultralytics",
+    "object_model": "models/yolov8n.pt"
+  }
+}
