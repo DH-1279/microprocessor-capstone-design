@@ -1,0 +1,5 @@
+# HailoRT, Picamera2, libcamera, OpenCV and NumPy: Pi OS apt packages.
+# Create the venv with --system-site-packages; see VISION_SETUP.md.
+bleak==3.0.2
+mediapipe==1.0.1
+sounddevice==0.5.3

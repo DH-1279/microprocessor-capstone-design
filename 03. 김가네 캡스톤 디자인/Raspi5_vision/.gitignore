@@ -1,0 +1,8 @@
+# Downloaded model weights, recordings, generated reports and local devices.
+models/*
+!models/coco.txt
+config/local.json
+reports/
+*.wav
+*.mp4
+*.avi
