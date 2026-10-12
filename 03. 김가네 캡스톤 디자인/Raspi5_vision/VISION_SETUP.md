@@ -2,6 +2,59 @@
 
 이 문서는 `haptic_mvp/vision.py`의 실제 영상 입력을 준비하는 절차다. 전체 실행 명령과 음성·BLE 준비는 이 폴더의 `README.md`를 따른다. 모델 파일을 한 번 내려받고 설치를 완료한 뒤에는 영상 추론에 인터넷을 사용하지 않는다.
 
+## 2026-10-12 첫 실기기 시험
+
+카메라와 AI HAT+ 2는 장착했고, 사용자 전달 결과로 Camera Module 3의 `imx708` 인식과 깨끗한 사진 촬영을 확인했다. HailoRT CLI와 장치 펌웨어는 모두 `5.1.1`, 장치 아키텍처는 `HAILO10H`로 식별됐다. 실제 모델 추론은 아직 확인 전이다. 마이크·스피커는 미도착이고 ESP PCB는 모듈 납땜을 진행한 뒤 전기적 검사·모터 연결을 앞두고 있으므로, **라즈베리파이 단독 영상 개발을 먼저 진행한다.**
+
+1. `sudo poweroff`로 종료하고 전원을 분리한다. Pi 5용 22핀 ↔ 카메라용 15핀 케이블로 표준 Camera Module 3 한 대를 먼저 연결한 뒤, AI HAT+ 2를 공식 안내대로 장착한다. 카메라는 책상 위에서 손과 컵을 함께 볼 수 있게 고정한다.
+2. 전원을 켠 후 아래 명령으로 기존 OS·SDK·장치 상태부터 확인한다. 명령이 없거나 장치 인식이 실패하면 아래 1장의 설치 절차를 따른다.
+
+```bash
+cat /etc/os-release
+uname -m
+python3 --version
+hailortcli --version
+hailortcli fw-control identify
+rpicam-hello --list-cameras
+mkdir -p /tmp/kimgane-bringup
+rpicam-still -n -t 2000 -o /tmp/kimgane-bringup/camera-test.jpg
+```
+
+3. `HAILO10H` 식별과 실제 사진 내용을 확인한다. 프로젝트 가상환경·모델 파일은 아래 2~3장대로 확인하고, 준비된 후 다음을 실행한다.
+
+```bash
+cd "$HOME/Desktop/kimGA_raspi/microprocessor-capstone-design/03. 김가네 캡스톤 디자인/Raspi5_vision"
+source .venv/bin/activate
+python -m haptic_mvp doctor --deep --console
+python -m haptic_mvp run --console
+```
+
+4. 컵과 손을 보여주고 `컵 찾아줘`, `정지`, `목록`, `quit`를 시험한다. `state`, `direction`, `proximity`, `levels`를 확인한다. `BLE=LOG ONLY`로 실행되므로 ESP 연결 없이 5채널 계산 결과까지 검증한다. `doctor` 통과만으로 실제 모델 추론 성공을 판단하지 않는다.
+
+SSH에서는 미리보기 없이 진행하며, Pi 데스크톱에서 화면을 확인하려면 4장의 로컬 미리보기 설정을 사용한다. 모델 오류·손 방향 오류·지연은 실제 Pi 로그를 보고 해결한다. 지금 단계에 CPU YOLO·음성 모델·BLE 연결은 필요하지 않다.
+
+하드웨어 장착 근거: [공식 카메라 설치 안내](https://www.raspberrypi.com/documentation/accessories/camera.html), [공식 AI 설치 안내](https://www.raspberrypi.com/documentation/computers/ai.html).
+
+## CPU와 AI HAT 온도 대시보드
+
+별도의 Pi SSH 터미널에서 프로젝트 폴더로 이동한 뒤 실행한다. 가상환경과 Python 추가 패키지는 필요 없다.
+
+```bash
+python3 tools/thermal_monitor.py
+# 한 번만 읽어 로그로 남기기
+python3 tools/thermal_monitor.py --once
+# 하드웨어 없이 화면 확인: SIMULATED 표시
+python3 tools/thermal_monitor.py --demo
+```
+
+CPU와 Hailo 칩 내부 온도, 0~100°C 막대, 실행 중 최고 온도를 기본 2초 간격으로 표시한다. 색상 경계는 표시용이며 제조사의 안전 한계나 HAT 표면 온도를 뜻하지 않는다. 종료는 `Ctrl+C`다.
+
+HailoRT 5.1.1 Python 래퍼에는 `query_health_stats`가 노출되지 않아, 설치된 C++ SDK의 `Device::query_health_stats().on_die_temperature`를 사용하는 작은 헬퍼를 시작 시 임시 폴더에서 컴파일한다. `g++`, Hailo 헤더와 `libhailort`가 필요하다. `g++`가 없으면 `sudo apt install g++`로 준비한다. 헤더·링크 오류가 나면 설치된 Hailo 개발 패키지 상태를 먼저 확인한다. 프로그램은 모델이나 장치 설정을 변경하지 않는다.
+
+조회 실패·시간 초과 시 해당 센서는 `N/A`와 오류를 표시하며, 이전 온도를 현재 값으로 재사용하지 않는다. 호스트에서 표시·오류 처리 테스트 8개를 통과했다. 10월 12일 사용자가 실행한 실제 Pi 화면에서 CPU 53.5°C·Hailo 45.6°C 동시 조회를 확인했다. 이는 기본적으로 켜 둔 상태의 측정이며, 추론 중 동시 조회·온도·지연은 추가 확인해야 한다. [실측 화면과 진행 기록](../docs/2026-10-12_DH_실물셋업_진행기록_및_main_구성안.md)을 참고한다.
+
+API 근거: [HailoRT 5.1.1 Device API](https://github.com/hailo-ai/hailort/blob/v5.1.1/hailort/libhailort/include/hailo/device.hpp), [온도 필드와 -1 누락값 정의](https://github.com/hailo-ai/hailort/blob/v5.1.1/hailort/libhailort/include/hailo/hailort.h).
+
 ## 지원 범위와 검증 상태
 
 - 카메라: CSI 카메라는 Picamera2, USB 카메라와 로컬 영상 파일은 OpenCV.
@@ -68,11 +121,11 @@ curl --fail --location \
 
 이 주소는 [Google Hand Landmarker 모델 안내](https://developers.google.com/edge/mediapipe/solutions/vision/hand_landmarker#models)의 공식 모델 링크다. 모델의 가중치를 저장소에 commit하지 않는다.
 
-다음은 [Hailo Model Zoo HAILO10H 목록](https://github.com/hailo-ai/hailo_model_zoo/blob/master/docs/public_models/HAILO10H/HAILO10H_object_detection.rst)에 명시된 RGB YOLOv8n 모델이다. 이 링크의 컴파일 버전은 **5.4.0**이다. 설치된 HailoRT와 이 HEF가 호환되는지 확인한다. 버전 불일치 오류가 발생하면 현재 HailoRT에 맞는 HAILO10H 모델을 공식 목록에서 선택하며, 다른 아키텍처 HEF로 교체하지 않는다.
+다음은 [Hailo Model Zoo v5.1.0 HAILO10H 목록](https://github.com/hailo-ai/hailo_model_zoo/blob/v5.1.0/docs/public_models/HAILO10H/HAILO10H_object_detection.rst)에 명시된 RGB YOLOv8n 모델이다. 10월 12일 실제 Pi의 HailoRT/펌웨어가 **5.1.1**로 확인되어, DFC **5.1.0**으로 컴파일된 모델을 첫 실행 대상으로 선택했다. [해당 릴리스](https://github.com/hailo-ai/hailo_model_zoo/releases/tag/v5.1.0)는 HailoRT 5.1.0 스택을 기준으로 한다. 현재 `master` 목록의 5.4.0 모델을 그대로 내려받지 않는다. 5.1.1에서의 최종 호환 여부와 NMS 출력 계약은 `parse-hef`와 아래 모델 생성·실제 추론으로 확인한다. 버전 불일치 오류가 발생하면 현재 HailoRT에 맞는 HAILO10H 모델을 공식 목록에서 선택하며, 다른 아키텍처 HEF로 교체하지 않는다.
 
 ```bash
 curl --fail --location \
-  'https://hailo-model-zoo.s3.eu-west-2.amazonaws.com/ModelZoo/Compiled/v5.4.0/hailo10h/yolov8n.hef' \
+  'https://hailo-model-zoo.s3.eu-west-2.amazonaws.com/ModelZoo/Compiled/v5.1.0/hailo10h/yolov8n.hef' \
   --output models/yolov8n_hailo10h.hef
 
 sha256sum models/hand_landmarker.task models/yolov8n_hailo10h.hef
