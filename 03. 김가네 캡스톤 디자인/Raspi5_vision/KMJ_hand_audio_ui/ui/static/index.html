@@ -1,0 +1,278 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>김가네 · 물건 찾기 안내</title>
+<!--
+  저시력 사용자를 위한 고대비 화면.
+
+  기본값은 검정 배경 + 노랑 글자다. 흰 배경은 빛 번짐과 눈부심을 만들고,
+  노랑은 망막이 가장 민감하게 반응하는 파장대라 어두운 배경 위에서 잘 보인다.
+  주변 시야가 좁거나 눈부심에 약한 경우에도 어두운 배경이 낫다.
+
+  대비비(배경 대 글자):
+    검정 #000 + 노랑 #FFD400   14.7:1
+    검정 #000 + 흰색 #FFF      21.0:1
+    패널 #111 + 노랑 #FFD400   13.2:1
+    노랑 버튼 + 검정 글자      14.7:1
+  WCAG 2.2 AA 일반 텍스트 기준은 4.5:1이다.
+
+  밝은 화면이 필요한 경우를 위해 노랑 배경 + 검정 글자(16.8:1)도 둔다.
+  연한 색끼리의 조합과 비슷한 명도의 조합은 쓰지 않는다.
+
+  모든 버튼에 두꺼운 테두리를 둔다. 경계가 뚜렷해야 형태를 찾기 쉽다.
+  색만으로 상태를 구분하지 않고 글자를 함께 쓴다.
+
+  실행 중인 프로그램의 Decision을 그대로 표시한다. 화면은 별도 목표 상태를
+  갖지 않고 모터를 직접 켜지 않는다. 개발용 수치는 이 화면에 두지 않는다.
+-->
+<style>
+:root{
+  color-scheme:dark;
+  --bg:#000;            /* 배경 */
+  --surface:#111;       /* 패널 */
+  --fg:#ffd400;         /* 본문 노랑 */
+  --strong:#fff;        /* 가장 중요한 글자 */
+  --muted:#d6d6d6;      /* 보조 설명 */
+  --line:#ffd400;       /* 테두리 */
+  --accent:#ffd400;     /* 주 버튼 바탕 */
+  --on-accent:#000;     /* 주 버튼 글자 */
+  --stop:#ff9e1b;       /* 중지 */
+  --ring:#fff;          /* 초점 테두리 */
+  font-size:22px;
+}
+/* 밝은 화면이 필요한 경우. 노랑 배경 + 검정 글자 16.8:1 */
+html[data-theme="light"]{
+  color-scheme:light;
+  --bg:#ffe800;--surface:#fff;--fg:#000;--strong:#000;--muted:#333;
+  --line:#000;--accent:#000;--on-accent:#ffe800;--stop:#8a2200;--ring:#000;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);
+  font-family:system-ui,"Malgun Gothic",sans-serif;line-height:1.7;
+  font-weight:600}
+button,select{font:inherit;font-weight:700;min-height:64px;
+  border:4px solid var(--line);border-radius:12px;padding:.7rem 1rem;
+  background:var(--surface);color:var(--fg)}
+button{cursor:pointer;text-align:center}
+button.primary{background:var(--accent);color:var(--on-accent);
+  border-color:var(--accent)}
+button.stop{background:var(--surface);color:var(--stop);
+  border-color:var(--stop);border-width:5px}
+button:disabled{cursor:default;color:var(--muted);border-color:var(--muted);
+  border-style:dashed;background:var(--bg)}
+button.primary:disabled{background:var(--bg);color:var(--muted);
+  border-color:var(--muted);border-style:dashed}
+button:hover:not(:disabled){text-decoration:underline;text-underline-offset:5px}
+button:focus-visible,a:focus-visible,summary:focus-visible,
+select:focus-visible{outline:5px solid var(--ring);outline-offset:4px}
+.skip{position:absolute;top:-200px;left:1rem;background:var(--surface);
+  color:var(--fg);border:4px solid var(--line);padding:.8rem;z-index:2}
+.skip:focus{top:.5rem}
+.wrap{max-width:860px;margin:auto;padding:1.2rem 1rem 3rem}
+header{display:flex;gap:1rem;justify-content:space-between;align-items:center;
+  flex-wrap:wrap;border-bottom:4px solid var(--line);padding-bottom:.8rem}
+.brand{font-weight:800;letter-spacing:.06em;color:var(--strong)}
+h1{font-size:2rem;margin:.8rem 0;color:var(--strong)}
+h2{font-size:1.2rem;margin:0 0 .6rem;color:var(--strong)}
+.intro{color:var(--muted);margin:.4rem 0 1.2rem;font-weight:500}
+.panel{background:var(--surface);border:4px solid var(--line);
+  border-radius:16px;padding:1.2rem;margin:1.2rem 0}
+.panel.lead{border-width:6px}
+.eyebrow{color:var(--muted);margin:0;font-size:.9rem;font-weight:600}
+.state{font-size:2rem;font-weight:800;margin:.3rem 0;color:var(--strong)}
+.target{margin:.6rem 0;font-size:1.15rem}
+.message{margin:.6rem 0 0;font-size:1.15rem}
+.actions{display:grid;grid-template-columns:1fr 1fr;gap:.8rem;margin-top:1.2rem}
+.objects{display:flex;flex-wrap:wrap;gap:.8rem}
+.objects button{flex:1 1 150px}
+.note{color:var(--muted);font-weight:500;margin:.8rem 0 0}
+.settings{display:grid;gap:1.1rem}
+.settings label{display:grid;gap:.4rem;font-weight:700}
+.settings select{width:100%}
+details{border-top:4px solid var(--line);padding:1rem 0;margin-top:1.4rem}
+summary{cursor:pointer;font-weight:800;min-height:56px;padding:.4rem 0;
+  color:var(--strong)}
+footer{margin-top:1.6rem;color:var(--muted);font-weight:500;font-size:.9rem}
+.sr-only{position:absolute;width:1px;height:1px;margin:-1px;padding:0;
+  overflow:hidden;clip-path:inset(50%);white-space:nowrap;border:0}
+@media(max-width:520px){
+  .actions{grid-template-columns:1fr}
+  .wrap{padding:.8rem .7rem 2rem}
+  .panel{padding:.9rem}
+  h1{font-size:1.6rem}
+  .state{font-size:1.7rem}
+  button{overflow-wrap:anywhere}
+}
+@media(forced-colors:active){
+  button{border:4px solid ButtonText}
+  .panel{border:4px solid CanvasText}
+}
+</style>
+</head>
+<body>
+<a class="skip" href="#main">물건 찾기로 바로가기</a>
+<div class="wrap">
+
+<header>
+  <span class="brand">김가네 · 물건 찾기</span>
+  <span id="link">연결 확인 중</span>
+</header>
+
+<main id="main" tabindex="-1">
+  <h1>책상 위 물건 찾기</h1>
+  <p class="intro">지금 프로그램이 하는 일을 그대로 보여줍니다.
+    버튼은 말로 하는 것과 똑같이 동작합니다.</p>
+
+  <section class="panel lead" aria-labelledby="status-heading">
+    <h2 id="status-heading" class="eyebrow">지금 상태</h2>
+    <p class="state" id="state">연결 중</p>
+    <p class="target">고른 물건: <strong id="target">없음</strong></p>
+    <p class="message" id="message"></p>
+    <div class="actions">
+      <button class="primary" id="done" disabled>찾았어요</button>
+      <button class="stop" id="stop">안내 중지</button>
+      <button id="list">뭐가 있는지 알려줘</button>
+      <button id="repeat">다시 알려줘</button>
+    </div>
+  </section>
+
+  <section class="panel" aria-labelledby="objects-heading">
+    <h2 id="objects-heading">찾을 물건 고르기</h2>
+    <div class="objects" id="objects"></div>
+    <p class="note" id="objectHint"></p>
+  </section>
+
+  <details>
+    <summary>화면 보기 설정</summary>
+    <div class="settings">
+      <label for="theme">화면 색상
+        <select id="theme">
+          <option value="dark">검정 바탕에 노란 글자</option>
+          <option value="light">노란 바탕에 검은 글자</option>
+        </select>
+      </label>
+      <label for="size">글자 크기
+        <select id="size">
+          <option value="22">기본</option>
+          <option value="28">크게</option>
+          <option value="34">더 크게</option>
+          <option value="42">아주 크게</option>
+        </select>
+      </label>
+    </div>
+    <p class="note">브라우저 확대도 함께 쓸 수 있습니다.</p>
+  </details>
+
+  <div class="sr-only" role="status" aria-live="polite" aria-atomic="true"
+       id="announcer"></div>
+</main>
+
+<footer>2026-10-13 · 담당 김민주</footer>
+</div>
+
+<script>
+'use strict';
+
+const el = id => document.getElementById(id);
+
+let socket = null, snapshot = null, counter = 0, announceTimer = null;
+
+/* 화면낭독기가 같은 문장도 다시 읽도록 비웠다가 넣는다. */
+function announce(text) {
+  clearTimeout(announceTimer);
+  el('announcer').textContent = '';
+  announceTimer = setTimeout(() => { el('announcer').textContent = text; }, 80);
+}
+
+function connect() {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  socket = new WebSocket(`${proto}://${location.host}/ws`);
+  socket.onopen = () => el('link').textContent = '연결됨';
+  socket.onclose = () => {
+    el('link').textContent = '화면 연결 끊김';
+    setTimeout(connect, 1500);
+  };
+  socket.onmessage = event => {
+    try { render(JSON.parse(event.data)); } catch (e) {}
+  };
+}
+
+function send(intent) {
+  counter += 1;
+  const payload = {
+    revision: snapshot ? snapshot.revision : null,
+    command_id: `ui-${Date.now()}-${counter}`,
+    intent: intent
+  };
+  if (socket && socket.readyState === WebSocket.OPEN) {
+    socket.send(JSON.stringify(payload));
+  } else {
+    fetch('/api/command', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload)
+    }).then(refresh).catch(() => {});
+  }
+}
+
+function refresh() {
+  fetch('/api/state').then(r => r.json()).then(render).catch(() => {});
+}
+
+function render(data) {
+  if (!data || !data.state) return;
+  const changed = !snapshot || snapshot.revision !== data.revision;
+  snapshot = data;
+
+  el('state').textContent = data.state_text;
+  el('target').textContent = data.target ? data.target_text : '없음';
+  el('message').textContent = data.message || '';
+
+  const allowed = data.allowed_actions || [];
+  ['done', 'list', 'repeat'].forEach(action => {
+    el(action).disabled = !allowed.includes(action);
+  });
+
+  renderObjects(data, allowed);
+  if (changed) announce(`${data.state_text}. ${data.message || ''}`);
+}
+
+function renderObjects(data, allowed) {
+  const box = el('objects');
+  const canSelect = allowed.includes('select_target');
+  box.textContent = '';
+
+  (data.objects || []).forEach(item => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = item.name;
+    button.disabled = !canSelect;
+    button.addEventListener('click',
+      () => send('select_' + item.id.replace(/ /g, '_')));
+    box.appendChild(button);
+  });
+
+  el('objectHint').textContent = canSelect
+    ? '찾을 물건을 고르면 안내를 시작합니다.'
+    : '안내하는 중입니다. 다른 물건을 고르려면 먼저 안내를 멈춰 주세요.';
+}
+
+el('stop').addEventListener('click', () => send('stop'));
+el('done').addEventListener('click', () => send('done'));
+el('list').addEventListener('click', () => send('list'));
+el('repeat').addEventListener('click', () => {
+  if (snapshot) announce(`${snapshot.state_text}. ${snapshot.message || ''}`);
+});
+
+el('theme').addEventListener('change', e =>
+  document.documentElement.setAttribute('data-theme', e.target.value));
+el('size').addEventListener('change', e =>
+  document.documentElement.style.fontSize = e.target.value + 'px');
+
+connect();
+refresh();
+</script>
+</body>
+</html>
