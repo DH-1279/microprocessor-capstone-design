@@ -17,3 +17,4 @@ YOLOv8 모델을 사용하여 입력 프레임을 분석하고, 0~1로 정규화
 총 18종의 일상 객체를 타겟으로 학습을 진행했습니다.
 - bottle, cell phone, cup, handbag, keyboard, laptop, mouse, remote, scissors, tie
 - Glasses, key, Medicine, Tumbler, Pen, Wallet, watch, Wireless Earbud
+ㄴhandbag, keyboard, laptop, mouse, scissors, tie 를 제외한 12개 클래스로 다시 진행할 예정 
