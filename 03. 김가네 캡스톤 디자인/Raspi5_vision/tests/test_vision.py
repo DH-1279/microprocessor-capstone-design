@@ -3,7 +3,7 @@
 No camera, Hailo or MediaPipe hardware is implied by passing these tests.
 """
 
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 import importlib.util
 from pathlib import Path
 import tempfile
@@ -67,6 +67,44 @@ class GeometryTests(unittest.TestCase):
         raw = [[[0, 0, 1, 1, 0.9], [0, 0, 0.5, 0.5, 0.8]]]
         self.assertEqual(len(decode_hailo_nms(raw, ("cup",), letterbox_geometry(1, 1, 1, 1),
                                             max_objects=1)), 1)
+
+    def test_hailo_yolov8_edge_predictions_use_normalized_units_outside_image(self):
+        # HailoRT 5.1.1 decode: center +/- distance * stride / image_size.
+        # A valid edge cell can therefore produce negative minima.
+        size, stride = 640, 32
+        center = 0.5 * stride / size
+        minimum = center - 2 * stride / size
+        maximum = center + 4 * stride / size
+        raw = [[[minimum, minimum, maximum, maximum, 0.9]]]
+        detected = decode_hailo_nms(raw, ("cup",), letterbox_geometry(size, size, size, size))
+        self.assertEqual(detected[0].box, (0, 0, maximum, maximum))
+
+    def test_hailo_overflow_restores_landscape_and_portrait_then_clips(self):
+        raw = [[[-0.03, -0.02, 1.04, 1.05, 0.9]]]
+        for width, height in ((640, 480), (480, 640)):
+            with self.subTest(width=width, height=height):
+                detected = decode_hailo_nms(raw, ("cup",), letterbox_geometry(width, height, 640, 640))
+                self.assertEqual(detected[0].box, (0, 0, 1, 1))
+
+    def test_hailo_overflow_preserves_visible_partial_box_geometry(self):
+        raw = [[[-0.05, 0.2, 0.5, 0.8, 0.9]]]
+        detected = decode_hailo_nms(raw, ("cup",), letterbox_geometry(640, 480, 640, 640))
+        self.assertEqual(detected[0].box, (0.2, 0, 0.8, 0.5))
+
+    def test_hailo_boxes_wholly_outside_original_image_are_discarded(self):
+        for row in ((-0.2, 0.1, -0.1, 0.3, 0.9), (1.1, 0.2, 1.2, 0.5, 0.9),
+                    (0.2, -0.2, 0.5, -0.1, 0.9), (0.2, 1.1, 0.5, 1.2, 0.9),
+                    (-0.1, 0.1, 0.1, 0.3, 0.9), (0.4, 0.5, 0.4, 0.6, 0.9)):
+            with self.subTest(row=row):
+                self.assertEqual(decode_hailo_nms([[row]], ("cup",),
+                                                letterbox_geometry(640, 480, 640, 640)), ())
+
+    def test_hailo_overflow_does_not_accept_nan_infinity_or_reversed_edges(self):
+        for row in ((float("nan"), 0.1, 0.8, 0.9, 0.9),
+                    (0.1, 0.2, float("inf"), 0.9, 0.9),
+                    (0.8, 0.1, -0.1, 0.9, 0.9), (0.1, 1.2, 0.8, -0.1, 0.9)):
+            with self.subTest(row=row), self.assertRaises(ValueError):
+                decode_hailo_nms([[row]], ("cup",), letterbox_geometry(640, 480, 640, 640))
 
     def test_nms_rejects_missing_classes_extra_batch_raw_heads(self):
         for raw in ([], [[[[0, 0, 1, 1, 0.8]]]], [[[0, 0, 1, 1, 0.8, 7]]]):
@@ -235,11 +273,29 @@ class ArrayAdapterTests(unittest.TestCase):
         model = SimpleNamespace(inputs=[input_stream], outputs=[output], input=lambda: input_stream,
                                  output=lambda: output, set_batch_size=lambda size: None,
                                  configure=lambda: nullcontext(configured))
-        physical = SimpleNamespace(identify=lambda: SimpleNamespace(device_architecture="HAILO10H"))
-        device = SimpleNamespace(get_physical_devices=lambda: [nullcontext(physical)],
+        board = SimpleNamespace(device_architecture="HAILO10H")
+        # Deliberately has no Device.identify: that API is on Control in 5.1.1.
+        physical = SimpleNamespace(control=SimpleNamespace(identify=lambda: board))
+
+        @contextmanager
+        def physical_context():
+            try:
+                yield physical
+            finally:
+                entered.append("physical_released")
+
+        device = SimpleNamespace(get_physical_devices=lambda: [physical_context()],
                                   create_infer_model=lambda path: model)
+
+        @contextmanager
+        def device_context():
+            try:
+                yield device
+            finally:
+                entered.append("vdevice_released")
+
         vdevice_type = type("VDeviceDouble", (), {"create_params": staticmethod(SimpleNamespace),
-                                                "__new__": lambda cls, params: nullcontext(device)})
+                                                "__new__": lambda cls, params: device_context()})
         module = SimpleNamespace(VDevice=vdevice_type, FormatType=SimpleNamespace(UINT8="UINT8", FLOAT32="FLOAT32"),
                                   HailoSchedulingAlgorithm=SimpleNamespace(ROUND_ROBIN="ROUND_ROBIN"))
         formats = SimpleNamespace(FormatOrder=SimpleNamespace(NHWC="NHWC", HAILO_NMS_BY_CLASS="NMS"))
@@ -258,10 +314,27 @@ class ArrayAdapterTests(unittest.TestCase):
                 self.assertEqual(detected[0].box, (0, 0, 1, 1))
                 self.assertIn(("out", "FLOAT32"), entered)
                 self.assertIn(("run", 1500), entered)
+                self.assertEqual(entered.count("physical_released"), 1)
+                self.assertEqual(entered.count("vdevice_released"), 1)
                 output.is_nms = False
                 with self.assertRaisesRegex(ValueError, "NMS"):
                     with HailoDetector(config):
                         pass
+                self.assertEqual(entered.count("vdevice_released"), 2)
+
+                board.device_architecture = "HAILO8"
+                with self.assertRaisesRegex(ValueError, "detected HAILO8"):
+                    with HailoDetector(config):
+                        pass
+                self.assertEqual(entered.count("physical_released"), 3)
+                self.assertEqual(entered.count("vdevice_released"), 3)
+
+                with patch.object(physical.control, "identify", side_effect=RuntimeError("identify failed")):
+                    with self.assertRaisesRegex(RuntimeError, "identify failed"):
+                        with HailoDetector(config):
+                            pass
+                self.assertEqual(entered.count("physical_released"), 4)
+                self.assertEqual(entered.count("vdevice_released"), 4)
 
 
 if __name__ == "__main__":
