@@ -26,15 +26,29 @@ import sys
 
 from .. import speech
 
-# Fallback used when the project config cannot be loaded, so the tool still
-# runs on a machine that only has this folder.
+# Used when the project config cannot be loaded. Matches the 18 classes of the
+# object model (docs/targets_18class.md). book is not one of them.
 FALLBACK_TARGETS = {
-    "cup": {"name": "컵", "aliases": ["컵", "머그", "cup"]},
-    "bottle": {"name": "물병", "aliases": ["물병", "생수", "보틀", "bottle"]},
+    "cup": {"name": "컵", "aliases": ["컵", "머그", "머그컵"]},
+    "bottle": {"name": "물병", "aliases": ["물병", "생수", "보틀", "물통"]},
     "cell phone": {"name": "휴대전화",
-                   "aliases": ["휴대폰", "휴대전화", "스마트폰", "핸드폰", "phone"]},
-    "book": {"name": "책", "aliases": ["책", "book"]},
-    "mouse": {"name": "마우스", "aliases": ["마우스", "mouse"]},
+                   "aliases": ["휴대전화", "휴대폰", "스마트폰"]},
+    "mouse": {"name": "마우스", "aliases": ["마우스"]},
+    "keyboard": {"name": "키보드", "aliases": ["키보드", "자판"]},
+    "laptop": {"name": "노트북", "aliases": ["노트북", "랩탑"]},
+    "remote": {"name": "리모컨", "aliases": ["리모컨", "리모콘"]},
+    "scissors": {"name": "가위", "aliases": ["가위"]},
+    "Glasses": {"name": "안경", "aliases": ["안경"]},
+    "key": {"name": "열쇠", "aliases": ["열쇠"]},
+    "Tumbler": {"name": "텀블러", "aliases": ["텀블러", "보온병"]},
+    "Wallet": {"name": "지갑", "aliases": ["지갑"]},
+    "watch": {"name": "시계", "aliases": ["시계", "손목시계"]},
+    "Wireless Earbud": {"name": "무선이어폰",
+                        "aliases": ["무선이어폰", "이어폰", "에어팟"]},
+    "handbag": {"name": "가방", "aliases": ["가방", "손가방"]},
+    "tie": {"name": "넥타이", "aliases": ["넥타이"]},
+    "Medicine": {"name": "약통", "aliases": ["약통", "약봉지"]},
+    "Pen": {"name": "볼펜", "aliases": ["볼펜", "펜"]},
 }
 
 # (상태, 입력, 기대 결과). None means the utterance must not start anything.
@@ -43,7 +57,10 @@ CASES = [
     ("scanning", "컵 찾아줘", "cup"),
     ("scanning", "물병 찾아줘", "bottle"),
     ("scanning", "휴대폰 찾아줘", "cell phone"),
-    ("scanning", "책 찾아줘", "book"),
+    ("scanning", "텀블러 찾아줘", "Tumbler"),
+    ("scanning", "안경 찾아줘", "Glasses"),
+    ("scanning", "지갑 찾아줘", "Wallet"),
+    ("scanning", "볼펜 찾아줘", "Pen"),
     ("scanning", "마우스 찾아줘", "mouse"),
     ("scanning", "머그 찾아줘", "cup"),
     ("scanning", "생수 찾아줘", "bottle"),
@@ -75,8 +92,9 @@ CASES = [
     # 안내를 시작하면 안 되는 발화
     ("scanning", "책상 정리했어", None),
     ("scanning", "책상 위에 뭐 있어", None),
-    ("scanning", "컵 말고 책", None),
-    ("scanning", "컵이랑 책 찾아줘", None),
+    ("scanning", "핸드폰", None),
+    ("scanning", "컵 말고 지갑", None),
+    ("scanning", "컵이랑 지갑 찾아줘", None),
     ("scanning", "마우스패드", None),
     ("scanning", "물컵 어디", None),
     ("scanning", "전화 왔어", None),

@@ -7,8 +7,11 @@ opened once by the common pipeline; nothing here opens a capture device.
 
 Two layers:
 
-  hand_from_result  MediaPipe landmarks to a representative point and a
-                    handedness decision. Ambiguous frames return None.
+  hand_candidates   MediaPipe landmarks to representative points, one per
+                    hand, with the handedness MediaPipe reported.
+  select_for_vote   which reading to hand to the stabilizer. A lone hand goes
+                    through even when it disagrees with vision.hand, so a
+                    flipped frame can be outvoted instead of dropped.
   HandStabilizer    smooths the two failures measured on 2026-10-07.
 
 Measured with a laptop webcam, hand_landmarker.task, cotton gloves, right hand:
@@ -71,11 +74,16 @@ def stability_config(values: dict | None = None) -> dict:
     return config
 
 
-def hand_from_result(result: Any, selected: str, threshold: float):
-    """Reject ambiguous hands; handedness score is not landmark confidence."""
+def hand_candidates(result: Any, threshold: float) -> tuple:
+    """Every usable hand in one frame, without choosing between them.
+
+    Handedness is reported, not filtered. detect() needs the reading even when
+    it disagrees with vision.hand, because that disagreement is exactly what
+    the vote has to see.
+    """
     from haptic_mvp.models import Hand
 
-    candidates = []
+    found = []
     if len(result.hand_landmarks) != len(result.handedness):
         raise ValueError("MediaPipe landmark/handedness counts differ")
     for landmarks, categories in zip(result.hand_landmarks, result.handedness):
@@ -87,8 +95,6 @@ def hand_from_result(result: Any, selected: str, threshold: float):
         if (handedness not in {"Left", "Right"} or not math.isfinite(score)
                 or not 0 <= score <= 1 or score < threshold):
             continue
-        if selected != "Any" and selected != handedness:
-            continue
         points = [(float(landmarks[i].x), float(landmarks[i].y))
                   for i in POINT_LANDMARKS]
         if any(not math.isfinite(value) or not 0 <= value <= 1
@@ -96,8 +102,30 @@ def hand_from_result(result: Any, selected: str, threshold: float):
             continue
         point = (sum(p[0] for p in points) / len(points),
                  sum(p[1] for p in points) / len(points))
-        candidates.append(Hand(point=point, score=score, handedness=handedness))
-    return candidates[0] if len(candidates) == 1 else None
+        found.append(Hand(point=point, score=score, handedness=handedness))
+    return tuple(found)
+
+
+def hand_from_result(result: Any, selected: str, threshold: float):
+    """Reject ambiguous hands; handedness score is not landmark confidence."""
+    matching = [hand for hand in hand_candidates(result, threshold)
+                if selected == "Any" or hand.handedness == selected]
+    return matching[0] if len(matching) == 1 else None
+
+
+def select_for_vote(result: Any, selected: str, threshold: float):
+    """
+    The reading to hand to the stabilizer.
+
+    A lone hand is passed through whatever MediaPipe called it, so a single
+    flipped frame reaches the vote instead of being dropped as the wrong hand.
+    With several hands the existing policy decides, so a second hand in frame
+    still stops guidance rather than being voted into the target.
+    """
+    candidates = hand_candidates(result, threshold)
+    if len(candidates) == 1:
+        return candidates[0]
+    return hand_from_result(result, selected, threshold)
 
 
 @dataclass(frozen=True)
@@ -202,7 +230,15 @@ class HandTracker:
             hand = tracker.detect(rgb, captured_at)
     """
 
-    def __init__(self, config: dict):
+    def __init__(self, config: dict, stability: dict | None = None):
+        """
+        config is the vision section. stability is passed separately.
+
+        The common loader rejects unknown keys, so `vision.hand_stability`
+        cannot be set in config/mvp.json until that key is added to
+        config.validate(). Until then the caller passes it here, or leaves it
+        out for the defaults.
+        """
         model = Path(str(config.get("hand_model", "")))
         if model.suffix.lower() != ".task" or not model.is_file():
             raise ValueError(
@@ -210,8 +246,9 @@ class HandTracker:
         self.model_path = str(model.resolve())
         self.selected = config.get("hand", "Right")
         self.threshold = float(config.get("hand_score_threshold", 0.6))
-        self.stabilizer = HandStabilizer(config.get("hand_stability"),
-                                         self.selected)
+        self.stabilizer = HandStabilizer(
+            stability if stability is not None else config.get("hand_stability"),
+            self.selected)
         self.last_timestamp = -1
         self.last_frame_id: int | None = None
         self.last_result = None
@@ -252,7 +289,7 @@ class HandTracker:
         self.last_timestamp = timestamp
         image = self.mp.Image(image_format=self.mp.ImageFormat.SRGB, data=rgb)
         result = self.tracker.detect_for_video(image, timestamp)
-        raw = hand_from_result(result, self.selected, self.threshold)
+        raw = select_for_vote(result, self.selected, self.threshold)
         self.last_result = self.stabilizer.update(raw, captured_at)
         return self.last_result
 

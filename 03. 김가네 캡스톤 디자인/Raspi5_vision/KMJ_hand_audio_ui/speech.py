@@ -145,7 +145,7 @@ def _alias_table(targets: dict) -> dict[str, tuple[str, ...]]:
     return table
 
 
-def _match(word: str, table: dict[str, tuple[str, ...]]):
+def _match(word: str, table: dict):
     """Closest entry within the threshold, or None. Whole words only."""
     best_name, best_alias, best_score = None, None, 1.0
     for name, aliases in table.items():

@@ -14,7 +14,7 @@ STT 인식률 측정 도구
 
 실행
     py stt_test.py --list              입력 장치 목록 보기
-    py stt_test.py --name K66          이름으로 마이크 선택 (권장)
+    py -m KMJ_hand_audio_ui.tools.stt_bench --name K66      이름으로 선택
     py stt_test.py --device 11         번호로 마이크 선택
     py stt_test.py --name K66 --model base
     py stt_test.py --name K66 --free   자유 입력 모드
@@ -29,31 +29,84 @@ import os
 import time
 from datetime import datetime
 
-import numpy as np
-import sounddevice as sd
+from .. import speech
 
-from command_mapper import parse, STATES
+# Audio libraries are imported where they are used, so --help and --list work
+# on a machine without them. Only the recording paths need them.
 
 TARGET_RATE = 16000          # Whisper가 쓰는 샘플레이트
 RESULT_CSV = "stt_results.csv"
 
+# Labels follow controller.targets, so "cell phone" rather than "phone".
 TEST_PROMPTS = [
     ("cup", "컵 찾아줘"),
     ("bottle", "물병 찾아줘"),
-    ("phone", "휴대폰 찾아줘"),
+    ("cell phone", "휴대폰 찾아줘"),
     ("book", "책 찾아줘"),
     ("mouse", "마우스 찾아줘"),
-    ("list", "목록"),
+    ("list", "리스트"),
     ("stop", "정지"),
     ("left", "왼쪽"),
     ("right", "오른쪽"),
 ]
 
+FALLBACK_TARGETS = {
+    "cup": {"name": "컵", "aliases": ["컵", "머그", "머그컵"]},
+    "bottle": {"name": "물병", "aliases": ["물병", "생수", "보틀", "물통"]},
+    "cell phone": {"name": "휴대전화",
+                   "aliases": ["휴대전화", "휴대폰", "스마트폰"]},
+    "mouse": {"name": "마우스", "aliases": ["마우스"]},
+    "keyboard": {"name": "키보드", "aliases": ["키보드", "자판"]},
+    "laptop": {"name": "노트북", "aliases": ["노트북", "랩탑"]},
+    "remote": {"name": "리모컨", "aliases": ["리모컨", "리모콘"]},
+    "scissors": {"name": "가위", "aliases": ["가위"]},
+    "Glasses": {"name": "안경", "aliases": ["안경"]},
+    "key": {"name": "열쇠", "aliases": ["열쇠"]},
+    "Tumbler": {"name": "텀블러", "aliases": ["텀블러", "보온병"]},
+    "Wallet": {"name": "지갑", "aliases": ["지갑"]},
+    "watch": {"name": "시계", "aliases": ["시계", "손목시계"]},
+    "Wireless Earbud": {"name": "무선이어폰",
+                        "aliases": ["무선이어폰", "이어폰", "에어팟"]},
+    "handbag": {"name": "가방", "aliases": ["가방", "손가방"]},
+    "tie": {"name": "넥타이", "aliases": ["넥타이"]},
+    "Medicine": {"name": "약통", "aliases": ["약통", "약봉지"]},
+    "Pen": {"name": "볼펜", "aliases": ["볼펜", "펜"]},
+}
+
+
+def load_targets(config_path=None):
+    """Prefer controller.targets so labels match the runtime."""
+    try:
+        from haptic_mvp.config import load_config
+    except ImportError:
+        return FALLBACK_TARGETS
+    try:
+        return load_config(config_path)["controller"]["targets"]
+    except Exception:
+        return FALLBACK_TARGETS
+
 
 # --- 장치 선택 --------------------------------------------------------------
 
+def _audio():
+    """Import the audio stack, with a clear message when it is missing."""
+    try:
+        import numpy as np
+        import sounddevice as sd
+    except Exception as error:
+        # sounddevice raises OSError when libportaudio2 is absent, so a bare
+        # ImportError check is not enough on a fresh Pi.
+        raise SystemExit(
+            "녹음에 필요한 것이 준비되지 않았습니다.\n"
+            "  sudo apt install libportaudio2\n"
+            "  python -m pip install sounddevice numpy faster-whisper\n"
+            f"  ({type(error).__name__}: {error})")
+    return np, sd
+
+
 def list_input_devices():
     """입력이 가능한 장치만 추려서 보여준다."""
+    _np, sd = _audio()
     print("\n사용 가능한 입력 장치\n")
     found = False
     for i, d in enumerate(sd.query_devices()):
@@ -70,6 +123,7 @@ def list_input_devices():
 
 def find_device(name):
     """이름 일부로 입력 장치를 찾는다."""
+    _np, sd = _audio()
     target = name.lower()
     for i, d in enumerate(sd.query_devices()):
         if d["max_input_channels"] > 0 and target in d["name"].lower():
@@ -84,6 +138,7 @@ def negotiate(device):
     WDM-KS 같은 일부 드라이버는 16kHz나 모노를 거부한다.
     그런 경우 장치가 되는 설정으로 받은 뒤 나중에 변환한다.
     """
+    _np, sd = _audio()
     info = sd.query_devices(device, "input")
     max_ch = int(info["max_input_channels"])
     default_sr = int(info["default_samplerate"])
@@ -111,6 +166,7 @@ def negotiate(device):
 
 def resample(audio, src_rate, dst_rate):
     """샘플레이트를 바꾼다. 선형 보간으로 충분하다."""
+    np, _sd = _audio()
     if src_rate == dst_rate:
         return audio
     n = int(round(len(audio) * dst_rate / src_rate))
@@ -121,6 +177,7 @@ def resample(audio, src_rate, dst_rate):
 
 def record(seconds, device, rate, channels):
     """녹음해서 16kHz 모노 배열로 돌려준다."""
+    np, sd = _audio()
     print(f"  녹음 중... ({seconds}초)")
     audio = sd.rec(int(seconds * rate), samplerate=rate,
                    channels=channels, dtype="float32", device=device)
@@ -166,8 +223,9 @@ def save_result(rows):
 
 # --- 실행 모드 --------------------------------------------------------------
 
-def run_measure(model, model_name, device, rate, channels, repeat):
-    rows = []
+def run_measure(model, model_name, device, rate, channels, repeat,
+                targets):
+    rows: list[list] = []
     total = success = stt_exact = 0
 
     print(f"\n{'=' * 60}")
@@ -192,7 +250,7 @@ def run_measure(model, model_name, device, rate, channels, repeat):
 
             audio = record(3, device, rate, channels)
             text, elapsed = transcribe(model, audio)
-            intent = parse(text, state="전체")
+            intent = speech.parse_input(text, targets, "any")
             mapped = intent.name
             ok = (mapped == expected)
 
@@ -237,28 +295,30 @@ def run_measure(model, model_name, device, rate, channels, repeat):
     save_result(rows)
 
 
-def run_free(model, device, rate, channels):
+def run_free(model, device, rate, channels, targets):
     print("\n자유 입력 모드입니다. 엔터를 누르면 3초간 녹음합니다.")
-    print("상태를 바꾸려면 :탐색 :선택 :안내 :전체 중 하나를 입력하세요.")
+    print(f"상태를 바꾸려면 :이름 을 입력하세요. "
+          f"{', '.join(speech.STATE_COMMANDS)}")
     print("종료하려면 q 를 입력하세요.\n")
 
-    state = "전체"
+    state = "any"
     while True:
         cmd = input(f"[{state}] 엔터 > ").strip()
         if cmd.lower() == "q":
             break
         if cmd.startswith(":"):
             new_state = cmd[1:]
-            if new_state in STATES:
+            if new_state in speech.STATE_COMMANDS:
                 state = new_state
                 print(f"  상태를 '{state}'(으)로 바꿨습니다.\n")
             else:
-                print(f"  알 수 없는 상태입니다. {list(STATES)}\n")
+                print(f"  알 수 없는 상태입니다. "
+                      f"{list(speech.STATE_COMMANDS)}\n")
             continue
 
         audio = record(3, device, rate, channels)
         text, elapsed = transcribe(model, audio)
-        intent = parse(text, state=state)
+        intent = speech.parse_input(text, targets, state)
 
         print(f"  STT 출력 : '{text}'  ({elapsed:.1f}초)")
         if intent:
@@ -287,6 +347,8 @@ def main():
         list_input_devices()
         return
 
+    targets = load_targets()
+
     device = args.device
     if args.name:
         found = find_device(args.name)
@@ -296,6 +358,7 @@ def main():
             return
         device = found
 
+    _np, sd = _audio()
     try:
         info = sd.query_devices(device, "input")
     except Exception as e:
@@ -329,9 +392,10 @@ def main():
     print("준비되었습니다.")
 
     if args.free:
-        run_free(model, device, rate, channels)
+        run_free(model, device, rate, channels, targets)
     else:
-        run_measure(model, args.model, device, rate, channels, args.repeat)
+        run_measure(model, args.model, device, rate, channels,
+                    args.repeat, targets)
 
 
 if __name__ == "__main__":

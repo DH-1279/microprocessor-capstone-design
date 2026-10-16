@@ -19,6 +19,17 @@ import time
 
 from .. import speech as intents
 
+try:
+    # Bound at module level on purpose. This module uses postponed
+    # annotations, and FastAPI resolves a route annotation against the
+    # module's globals. A name bound inside build_app() is invisible there,
+    # so `socket: WebSocket` stays an unresolved string, FastAPI treats
+    # `socket` as a required query parameter, and every /ws connection closes
+    # with code 1008.
+    from fastapi import WebSocket
+except ImportError:  # serve() reports this; the rest of the runtime is fine.
+    WebSocket = None
+
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 PUSH_INTERVAL_S = 0.1          # 10 Hz, inside the 5-10 Hz the UX spec asks for.
 DEFAULT_HOST = "0.0.0.0"
@@ -61,6 +72,27 @@ REASON_TEXT = {
 }
 
 FINGERS = ("엄지", "검지", "중지", "약지", "소지")
+
+
+# The controller's (state, reason) pair mapped to the parser's state names,
+# so buttons, speech and the controller all refuse the same things.
+INTENT_STATE = {
+    ("scanning", None): "scanning",
+    ("guiding", "moving"): "guiding",
+    ("guiding", "near"): "near",
+    ("paused", "hand_lost"): "waiting",
+    ("paused", "target_lost"): "scanning",
+    ("paused", "stale_frame"): "paused",
+    ("paused", "ble_disconnected"): "paused",
+    ("stopped", None): "stopped",
+}
+
+
+def intent_state(state: str, reason: str) -> str:
+    """Which parser state this decision corresponds to."""
+    return (INTENT_STATE.get((state, reason))
+            or INTENT_STATE.get((state, None))
+            or "any")
 
 
 def allowed_actions(state: str, reason: str) -> tuple[str, ...]:
@@ -134,8 +166,13 @@ class Bridge:
                 if len(self._seen_commands) > 500:
                     self._seen_commands.clear()
 
-        intent = intents.parse_input(raw, self.targets)
-        is_stop = intent.kind == "control" and intent.name == "stop"
+        # The page must refuse what the current state refuses. Without the
+        # state, select_book is accepted while guiding even though the button
+        # is not offered.
+        decision, _ = self.decision_source()
+        state = intent_state(decision.state, decision.reason)
+        intent = intents.parse_input(raw, self.targets, state)
+        is_stop = raw in ("stop", "정지", "멈춰")
 
         # A late start must not restart guidance the user already stopped.
         # Stop itself is never refused for being late.
@@ -158,7 +195,7 @@ class Bridge:
 def build_app(bridge: Bridge):
     import asyncio
 
-    from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+    from fastapi import FastAPI, WebSocketDisconnect
     from fastapi.responses import FileResponse, JSONResponse
 
     app = FastAPI(title="haptic glove status")
@@ -237,9 +274,11 @@ def serve(decision_source, on_text, stop: threading.Event, targets: dict,
             config = uvicorn.Config(build_app(bridge), host=host, port=port,
                                     log_level="warning")
             server = uvicorn.Server(config)
-            watcher = threading.Thread(
-                target=lambda: (stop.wait(), setattr(server, "should_exit", True)),
-                daemon=True)
+            def shut_down():
+                stop.wait()
+                server.should_exit = True
+
+            watcher = threading.Thread(target=shut_down, daemon=True)
             watcher.start()
             print(f"[frontend] http://localhost:{port}", flush=True)
             server.run()

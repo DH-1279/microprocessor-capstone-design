@@ -31,31 +31,37 @@ import sys
 import tempfile
 import wave
 
-# Fixed announcements. Wording follows the accessibility UX spec: visual
-# proximity is reported as such, never as having arrived or being able to grasp.
+# The runtime reuses a cached file only when the text matches exactly, so
+# these must be the strings controller.py actually emits. They are copied from
+# controller.step() and controller._request() rather than rewritten.
+#
+# controller builds the object sentences with a fixed particle, which produces
+# "마우스을" and "휴대전화을". That is wrong Korean, but changing it here would
+# only break the cache. Fixing the particle belongs in controller.py; this tool
+# follows whatever it says today.
 FIXED = {
-    "ready": "준비됐어요. 찾을 물건을 말하거나 목록을 선택해 주세요.",
-    "stopped": "안내를 멈췄어요.",
-    "hand_lost": "손이 보이지 않아 안내를 잠시 멈춥니다.",
-    "hand_recovered": "손을 다시 확인했어요. 계속할까요?",
-    "target_lost": "목표를 놓쳤습니다. 물체를 다시 선택해 주세요.",
-    "stale_frame": "영상이 갱신되지 않아 안내를 멈춥니다.",
-    "ble_lost": "장갑 연결 상태가 바뀌었어요. 다시 선택해 주세요.",
-    "near": "영상에서 목표와 가까워졌어요. 손으로 확인해 주세요.",
-    "nothing_around": "주변에 아는 물건이 없습니다.",
-    "unknown": "알아듣지 못했어요. 다시 말씀해 주세요.",
+    "stopped": "안내를 중지했습니다.",
+    "list": "주변 물체를 다시 확인하겠습니다.",
     "one_target": "찾을 물체 하나를 다시 말씀해 주세요.",
+    "side_unclear": "좌우 구분이 어렵습니다. 물체를 떨어뜨려 놓아 주세요.",
+    "target_lost": "목표를 놓쳤습니다. 물체를 다시 선택해 주세요.",
+    "hand_lost": "손이 보이지 않아 안내를 잠시 멈춥니다.",
+    "stale_frame": "영상이 갱신되지 않아 안내를 멈춥니다.",
+    "near": "목표 가까이에 있습니다.",
 }
 
-# Sentences the controller builds around an object name.
-# {name} is the configured display name; {subject} and {object} pick the
-# particle that matches its final consonant.
+# {name} is controller.targets[label]["name"].
+# The particles are fixed because controller.py fixes them.
 TEMPLATES = {
-    "selected": "{name}{object} 찾아 안내하겠습니다.",
-    "not_stable": "현재 {name}{subject} 안정적으로 보이지 않습니다.",
-    "several": "{name}{subject} 여러 개 보입니다. 왼쪽 또는 오른쪽을 말씀해 주세요.",
+    "selected": "{name}을 찾아 안내하겠습니다.",
+    "not_stable": "현재 {name}이 안정적으로 보이지 않습니다.",
+    "several": "{name}이 여러 개 보입니다. 왼쪽 또는 오른쪽을 말씀해 주세요.",
 }
 
+# The scan announcement joins every stable label, so the number of possible
+# sentences grows with the combinations. Only the single-object form is
+# pre-built; the rest are synthesised at runtime as before.
+SEEN_TEMPLATE = "{names}이 보입니다."
 
 def has_final_consonant(word: str) -> bool:
     if not word:
@@ -65,6 +71,7 @@ def has_final_consonant(word: str) -> bool:
 
 
 def with_particles(template: str, name: str) -> str:
+    """Kept for the sentences that do choose a particle."""
     final = has_final_consonant(name)
     return template.format(name=name,
                            subject="이" if final else "가",
@@ -78,12 +85,16 @@ def cache_name(voice: str, rate: int, text: str) -> str:
 
 
 def sentences(targets: dict) -> dict[str, str]:
+    """Every sentence the runtime can emit for a single object."""
     items = dict(FIXED)
+    names = []
     for label, item in targets.items():
         name = str(item.get("name", label))
+        names.append(name)
         key = label.replace(" ", "_")
         for template_key, template in TEMPLATES.items():
-            items[f"{template_key}_{key}"] = with_particles(template, name)
+            items[f"{template_key}_{key}"] = template.format(name=name)
+        items[f"seen_{key}"] = SEEN_TEMPLATE.format(names=name)
     return items
 
 
@@ -190,7 +201,7 @@ def main() -> int:
 
     built = skipped = 0
     total_bytes = 0
-    failures = []
+    failures: list[tuple[str, str]] = []
     for key, text in items.items():
         path = cache / cache_name(voice, rate, text)
         if path.is_file() and not args.force:

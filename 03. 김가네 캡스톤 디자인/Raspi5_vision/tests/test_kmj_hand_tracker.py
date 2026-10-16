@@ -191,6 +191,49 @@ class ScoreTests(unittest.TestCase):
         self.assertIsNotNone(stabilizer.update(FakeHand(score=0.9), 0.1))
 
 
+class TrackerPathTests(unittest.TestCase):
+    """The vote must see the frame the filter used to discard.
+
+    Reported 2026-10-14: detect() filtered by vision.hand before the vote, so
+    one flipped frame was dropped instead of outvoted and the stabilizer never
+    saw the opposite reading.
+    """
+
+    def test_a_lone_flipped_frame_reaches_the_vote(self):
+        from KMJ_hand_audio_ui.hand_tracker import HandStabilizer, select_for_vote
+
+        stabilizer = HandStabilizer(selected="Right")
+        readings = [("Right", 0.2), ("Left", 0.8)]
+        results = []
+        for index, (name, x) in enumerate(readings):
+            raw = select_for_vote(mediapipe_result(name, x=x), "Right", 0.6)
+            results.append(stabilizer.update(raw, index * 0.05))
+
+        self.assertTrue(all(result is not None for result in results))
+        self.assertEqual(results[1].point[0], 0.8)
+        self.assertEqual(stabilizer.stats().flips_absorbed, 1)
+        self.assertEqual(stabilizer.stats().held, 0)
+        self.assertEqual(list(stabilizer.votes), ["Right", "Left"])
+
+    def test_several_hands_keep_the_existing_policy(self):
+        from KMJ_hand_audio_ui.hand_tracker import select_for_vote
+
+        both = SimpleNamespace(
+            hand_landmarks=[[SimpleNamespace(x=x, y=0.5) for _ in range(21)]
+                            for x in (0.3, 0.7)],
+            handedness=[[SimpleNamespace(category_name=name, score=0.9)]
+                        for name in ("Left", "Right")])
+        chosen = select_for_vote(both, "Right", 0.6)
+        self.assertIsNotNone(chosen)
+        self.assertEqual(chosen.handedness, "Right")
+
+        same = SimpleNamespace(
+            hand_landmarks=both.hand_landmarks,
+            handedness=[[SimpleNamespace(category_name="Right", score=0.9)]
+                        for _ in range(2)])
+        self.assertIsNone(select_for_vote(same, "Right", 0.6))
+
+
 class FrameIdTests(unittest.TestCase):
     """A result must belong to one frame, so parallel inference cannot mix."""
 

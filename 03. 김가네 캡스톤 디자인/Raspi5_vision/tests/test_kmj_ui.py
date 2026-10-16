@@ -1,6 +1,7 @@
 """Status page contracts tested without a browser, web server or camera."""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+import importlib.util
 import time
 import unittest
 
@@ -145,6 +146,85 @@ class CommandTests(unittest.TestCase):
         before = harness.decision
         harness.bridge.handle({"intent": "stop"})
         self.assertIs(harness.decision, before)
+
+
+class StateRestrictionTests(unittest.TestCase):
+    """The page must refuse what the current state refuses.
+
+    Reported 2026-10-14: handle() parsed without a state, so select_book was
+    accepted while guiding even though the button is not offered.
+    """
+
+    def test_a_target_is_refused_while_guiding(self):
+        harness = Harness()
+        harness.set(state="guiding", reason="moving", target="cup")
+        result = harness.bridge.handle({"intent": "select_cup"})
+        self.assertFalse(result["accepted"])
+        self.assertEqual(result["reason"], "not_allowed_in_state")
+        self.assertEqual(harness.sent, [])
+
+    def test_stop_is_still_accepted_while_guiding(self):
+        harness = Harness()
+        harness.set(state="guiding", reason="moving", target="cup")
+        self.assertTrue(harness.bridge.handle({"intent": "stop"})["accepted"])
+
+    def test_done_only_when_the_image_reports_near(self):
+        harness = Harness()
+        harness.set(state="guiding", reason="moving", target="cup")
+        self.assertFalse(harness.bridge.handle({"intent": "done"})["accepted"])
+        harness.set(state="guiding", reason="near", target="cup")
+        self.assertTrue(harness.bridge.handle({"intent": "done"})["accepted"])
+
+    def test_a_target_is_accepted_again_once_stopped(self):
+        harness = Harness()
+        harness.set(state="stopped", reason="user_stop")
+        self.assertTrue(harness.bridge.handle({"intent": "select_cup"})["accepted"])
+
+
+@unittest.skipUnless(
+    importlib.util.find_spec("fastapi") and importlib.util.find_spec("httpx"),
+    "FastAPI checks need fastapi and httpx")
+class WebSocketTests(unittest.TestCase):
+    """The /ws route must accept a connection.
+
+    Reported 2026-10-14: WebSocket was imported inside build_app() while the
+    module uses postponed annotations, so FastAPI could not resolve the
+    annotation, treated `socket` as a required query parameter and closed
+    every connection with code 1008.
+    """
+
+    def client(self, harness):
+        from fastapi.testclient import TestClient
+
+        from KMJ_hand_audio_ui.ui.server import build_app
+
+        return TestClient(build_app(harness.bridge))
+
+    def test_the_route_has_no_query_parameters(self):
+        from KMJ_hand_audio_ui.ui.server import build_app
+
+        app = build_app(Harness().bridge)
+        route = next(r for r in app.routes if getattr(r, "path", "") == "/ws")
+        self.assertEqual([p.name for p in route.dependant.query_params], [])
+
+    def test_connecting_receives_the_current_state(self):
+        harness = Harness()
+        with self.client(harness).websocket_connect("/ws") as socket:
+            self.assertEqual(socket.receive_json()["state"], "scanning")
+
+    def test_stop_sent_over_the_socket_reaches_the_controller(self):
+        harness = Harness()
+        with self.client(harness).websocket_connect("/ws") as socket:
+            first = socket.receive_json()
+            socket.send_json({"intent": "stop", "revision": first["revision"]})
+            self.assertTrue(socket.receive_json()["ack"]["accepted"])
+        self.assertEqual(harness.sent, ["정지"])
+
+    def test_http_paths_still_work(self):
+        client = self.client(Harness())
+        self.assertEqual(client.get("/api/state").status_code, 200)
+        self.assertTrue(
+            client.post("/api/command", json={"intent": "stop"}).json()["accepted"])
 
 
 if __name__ == "__main__":

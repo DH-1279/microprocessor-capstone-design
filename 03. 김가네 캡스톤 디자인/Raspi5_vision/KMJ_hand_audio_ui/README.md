@@ -26,6 +26,10 @@ from KMJ_hand_audio_ui.hand_tracker import HandTracker
 
 with HandTracker(config["vision"]) as tracker:
     hand = tracker.detect(rgb, captured_at, frame_id)
+
+# 보정 설정을 바꾸려면 두 번째 인자로 넘긴다
+with HandTracker(config["vision"], {"hold_ms": 0}) as tracker:
+    ...
 ```
 
 | | 형식 |
@@ -41,9 +45,13 @@ with HandTracker(config["vision"]) as tracker:
 
 `vision.MediaPipeHandTracker`를 대체한다. 설정 키와 계약은 같고, 측정으로 확인한 보정이 안에 들어 있다.
 
-### 두 층
+### 세 층
 
-**`hand_from_result`** — MediaPipe 랜드마크에서 대표점과 좌우를 뽑는다. 대표점은 손목과 네 손가락 뿌리 관절 5개의 평균이다. 손이 둘이거나, 요청한 손이 아니거나, 좌표가 범위를 벗어나면 `None`을 돌려준다.
+**`hand_candidates`** — 한 프레임의 쓸 수 있는 손을 모두 돌려준다. 좌우로 거르지 않는다.
+
+**`select_for_vote`** — 투표에 넘길 손을 고른다. 손이 하나면 MediaPipe가 뭐라고 했든 그대로 넘겨서, 뒤집힌 프레임이 버려지지 않고 투표에서 밀리게 한다. 손이 여럿이면 기존 정책이 결정하므로 두 번째 손이 들어오면 여전히 안내가 멈춘다.
+
+**`hand_from_result`** — 기존 호출부를 위해 남겨둔 것. 좌우로 거르고 모호하면 `None`이다. 대표점은 손목과 네 손가락 뿌리 관절 5개의 평균이다. 손이 둘이거나, 요청한 손이 아니거나, 좌표가 범위를 벗어나면 `None`을 돌려준다.
 
 **`HandStabilizer`** — 아래 보정을 한다. 따로 쓸 수도 있다.
 
@@ -61,6 +69,8 @@ hand = stabilizer.update(raw_hand, captured_at)
 **짧은 소실 유지.** 마지막으로 측정된 점을 기본 400ms까지 반복한다. 측정된 적 없는 손은 유지하지 않으며, 시간이 지나면 버린다.
 
 ### 설정
+
+**공통 설정 파일에는 넣을 수 없다.** `config.validate()`가 모르는 키를 거부하므로 `vision.hand_stability`를 `config/mvp.json`에 적으면 `Unknown configuration key` 오류가 난다. 공통 설정에 키를 추가하기 전까지는 생성자 인자로 넘긴다.
 
 | 키 | 기본값 | 뜻 |
 |---|---|---|
@@ -102,7 +112,7 @@ from KMJ_hand_audio_ui.hand_tracker import HandTracker
 tracker = resources.enter_context(HandTracker(config))
 ```
 
-`detect()` 호출부는 그대로 두어도 되고, `frame_id`를 함께 넘기면 프레임 섞임을 막는다. 설정을 추가하지 않으면 기본값으로 동작하고, `hand_stability.hold_ms: 0`으로 두면 유지가 꺼진다.
+`detect()` 호출부는 그대로 두어도 되고, `frame_id`를 함께 넘기면 프레임 섞임을 막는다. 인자를 넘기지 않으면 기본값으로 동작하고, `HandTracker(config, {"hold_ms": 0})`으로 두면 유지가 꺼진다.
 
 **보정 전후를 비교해 측정한 뒤에 켜는 것을 제안한다.** 유지가 과하면 이미 사라진 손으로 안내하게 되므로, 실제 장갑으로 `stats().hold_ratio`를 보고 정하면 좋겠다.
 
@@ -192,8 +202,10 @@ serve(lambda: tuple(latest), on_text, thread_stop,
 ### 설치
 
 ```
-python -m pip install fastapi uvicorn
+python -m pip install fastapi "uvicorn[standard]"
 ```
+
+`uvicorn[standard]`가 필요하다. 기본 `uvicorn`에는 WebSocket 백엔드가 없어 실제 서버에서 `/ws` 연결이 되지 않는다.
 
 **없어도 프로그램은 돌아간다.** 메시지만 남기고 넘어간다. 브라우저가 끊겨도 안내는 계속된다. 메인 루프를 막지 않도록 별도 스레드에서 돈다.
 
@@ -264,7 +276,13 @@ python -m KMJ_hand_audio_ui.tools.console_check --state guiding
 
 ### prebuild_tts.py
 
-`audio.py`를 고치지 않는다. `tts_cache_path()`가 `sha256("espeak-ng\0voice\0rate\0text")`로 파일명을 만들고 파일이 있으면 재사용하므로, **같은 규칙으로 미리 WAV를 넣어두면 실행 중에 합성하지 않는다.** 해시가 일치하는 것을 확인했다.
+`audio.py`를 고치지 않는다. `tts_cache_path()`가 `sha256("espeak-ng\0voice\0rate\0text")`로 파일명을 만들고 파일이 있으면 재사용하므로, **같은 규칙으로 미리 WAV를 넣어두면 실행 중에 합성하지 않는다.**
+
+**문장은 `controller.py`가 실제로 내보내는 것과 글자까지 같아야 한다.** 해시가 같아도 텍스트가 다르면 런타임이 다시 합성한다. 그래서 이 도구는 `controller.step()`과 `_request()`의 문자열을 그대로 쓴다.
+
+`controller`가 조사를 `을`로 고정해 "마우스을", "휴대전화을"을 내보낸다. 한국어로는 틀렸지만 여기서 고치면 캐시가 어긋나므로 그대로 따른다. 조사를 고치는 것은 `controller.py` 쪽 일이다.
+
+주변 물체 목록 안내는 보이는 라벨을 이어 붙이므로 조합 수가 많다. 물체 하나짜리 형태만 미리 만들고 나머지는 기존대로 실행 중에 합성한다.
 
 파이에서 espeak 프로세스가 뜨지 않고 첫 발화 지연이 사라진다.
 
@@ -277,14 +295,16 @@ python -m KMJ_hand_audio_ui.tools.console_check --state guiding
 ## 5. 시험
 
 ```
-python -m unittest discover tests
+python3 -m unittest discover -s tests -p 'test_kmj_*.py'
 ```
+
+전체 시험은 개발 의존성이 있는 환경에서 `python -m pytest -q`로 수행한다. `python -m unittest discover tests`는 pytest를 쓰는 기존 시험까지 불러온다.
 
 | 파일 | 건수 |
 |---|---|
 | `tests/test_kmj_speech.py` | 31 |
-| `tests/test_kmj_ui.py` | 14 |
-| `tests/test_kmj_hand_tracker.py` | 24 |
+| `tests/test_kmj_ui.py` | 22 (WebSocket 4건은 fastapi 필요) |
+| `tests/test_kmj_hand_tracker.py` | 26 |
 
 카메라·마이크·Hailo·BLE 없이 실행된다.
 

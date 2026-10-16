@@ -1,7 +1,13 @@
 """
-손 인식률 측정 도구
+손 인식률 측정 도구 (웹캠 전용)
 
 노트북 웹캠으로 MediaPipe Hand Landmarker의 인식률을 측정한다.
+
+**라즈베리파이의 CSI 카메라에는 쓰지 않는다.** OpenCV 웹캠 입력과 화면
+창을 쓰므로 Picamera2 경로와 SSH 환경에 맞지 않는다. 파이에서의 측정은
+공통 카메라 입력을 쓰는 별도 도구가 필요하며 아직 만들지 않았다.
+
+이 도구는 카메라를 직접 연다. 통합 실행과 동시에 쓰지 않는다.
 맨손 / 장갑 / 색상별 / 자세별 조건을 바꿔가며 같은 방식으로 재고,
 결과를 results.csv에 쌓는다.
 
@@ -24,6 +30,7 @@
 import argparse
 import csv
 import os
+import sys
 import time
 from datetime import datetime
 
@@ -32,7 +39,7 @@ import mediapipe as mp
 from mediapipe.tasks import python as mp_python
 from mediapipe.tasks.python import vision
 
-MODEL_PATH = "hand_landmarker.task"
+MODEL_PATH = "models/hand_landmarker.task"
 RESULT_CSV = "results.csv"
 
 # 손 랜드마크 연결선 (21개 점을 손 모양으로 잇는다)
@@ -89,7 +96,7 @@ def save_result(label, total, detected, elapsed):
     print(f"{RESULT_CSV} 에 저장했습니다.\n")
 
 
-def main():
+def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--label", default="측정",
                         help="측정 조건 이름 (예: 맨손, 검정장갑)")
@@ -105,7 +112,7 @@ def main():
         print("아래 주소에서 받아 같은 폴더에 두세요.")
         print("https://storage.googleapis.com/mediapipe-models/"
               "hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task")
-        return
+        return 1
 
     options = vision.HandLandmarkerOptions(
         base_options=mp_python.BaseOptions(model_asset_path=MODEL_PATH),
@@ -119,7 +126,7 @@ def main():
     cap = cv2.VideoCapture(args.camera)
     if not cap.isOpened():
         print(f"카메라 {args.camera} 를 열 수 없습니다.")
-        return
+        return 1
 
     measuring = False
     total = 0
@@ -186,7 +193,8 @@ def main():
 
     cap.release()
     cv2.destroyAllWindows()
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
