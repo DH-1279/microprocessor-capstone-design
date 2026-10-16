@@ -35,23 +35,40 @@ SSH에서는 미리보기 없이 진행하며, Pi 데스크톱에서 화면을 �
 
 하드웨어 장착 근거: [공식 카메라 설치 안내](https://www.raspberrypi.com/documentation/accessories/camera.html), [공식 AI 설치 안내](https://www.raspberrypi.com/documentation/computers/ai.html).
 
-## CPU와 AI HAT 온도 대시보드
+## CPU·AI HAT 온도와 액티브 쿨러 대시보드
 
 별도의 Pi SSH 터미널에서 프로젝트 폴더로 이동한 뒤 실행한다. 가상환경과 Python 추가 패키지는 필요 없다.
 
 ```bash
 python3 tools/thermal_monitor.py
+# 터미널 감지가 안 되는 SSH 환경에서 화면 갱신을 명시적으로 선택
+python3 tools/thermal_monitor.py --screen
 # 한 번만 읽어 로그로 남기기
 python3 tools/thermal_monitor.py --once
+# 의도적으로 여러 샘플을 파일에 누적하기
+python3 tools/thermal_monitor.py --log > thermal.log
 # 하드웨어 없이 화면 확인: SIMULATED 표시
 python3 tools/thermal_monitor.py --demo
 ```
 
-CPU와 Hailo 칩 내부 온도, 0~100°C 막대, 실행 중 최고 온도를 기본 2초 간격으로 표시한다. 색상 경계는 표시용이며 제조사의 안전 한계나 HAT 표면 온도를 뜻하지 않는다. 종료는 `Ctrl+C`다.
+CPU와 Hailo 칩 내부 온도, 0~100°C 막대, 실행 중 최고 온도를 기본 2초 간격으로 표시한다. CPU 옆에는 액티브 쿨러의 상태와 실제 회전 센서 RPM을 표시한다. 터미널이 좁으면 팬 정보를 별도 행으로 배치한다. 색상 경계는 표시용이며 제조사의 안전 한계나 HAT 표면 온도를 뜻하지 않는다. 종료는 `Ctrl+C`다.
+
+| 팬 표시 | 의미 |
+|---|---|
+| `FAN RUNNING 2726 RPM` | 현재 회전 센서값이 0보다 큼. 숫자는 예시 |
+| `FAN STOPPED 0 RPM` | 현재 회전 센서값이 0이며, 읽을 수 있는 PWM이 양수인 상태는 아님 |
+| `FAN CHECK 0 RPM (PWM ON)` | PWM 출력은 있지만 현재 회전 센서값은 0. 시작 직후인지, 연결·회전에 문제가 있는지 확인 |
+| `FAN N/A` | 팬 또는 RPM 센서를 읽을 수 없음. 정지 상태로 추정하지 않음 |
+
+팬은 `/sys/class/hwmon/hwmon*/name`이 `pwmfan` 또는 `pwm-fan`인 장치에서 `fan1_input`을 읽는다. `hwmon2` 같은 번호를 고정하지 않는다. `pwm1`은 읽기만 하며 커널의 자동 팬 제어를 변경하지 않는다. RPM은 드라이버의 회전 센서 측정값으로, 순간적인 시작·정지 상태에는 갱신 지연이 있을 수 있다. [Linux pwm-fan 센서 설명](https://docs.kernel.org/hwmon/pwm-fan.html)
+
+PuTTY에서는 `watch`로 감싸지 않고 위 Python 명령을 직접 실행한다. 대시보드는 별도 터미널 화면을 사용하고 각 행의 고정 위치를 갱신한다. 화면 크기에 맞춰 출력 범위를 제한하고 갱신 때 새 줄을 추가하지 않아 스크롤이 누적되지 않도록 했다. `Ctrl+C`나 예외 종료 시 커서와 원래 터미널 화면을 복원한다. 표준 출력이 터미널이 아니면 기본적으로 한 번만 출력하고 종료하며, 반복 기록은 `--log`로 명시한다. `--screen`과 `--log`는 함께 사용할 수 없고, `--once`는 항상 한 번만 출력한다.
 
 HailoRT 5.1.1 Python 래퍼에는 `query_health_stats`가 노출되지 않아, 설치된 C++ SDK의 `Device::query_health_stats().on_die_temperature`를 사용하는 작은 헬퍼를 시작 시 임시 폴더에서 컴파일한다. `g++`, Hailo 헤더와 `libhailort`가 필요하다. `g++`가 없으면 `sudo apt install g++`로 준비한다. 헤더·링크 오류가 나면 설치된 Hailo 개발 패키지 상태를 먼저 확인한다. 프로그램은 모델이나 장치 설정을 변경하지 않는다.
 
-조회 실패·시간 초과 시 해당 센서는 `N/A`와 오류를 표시하며, 이전 온도를 현재 값으로 재사용하지 않는다. 호스트에서 표시·오류 처리 테스트 8개를 통과했다. 10월 12일 사용자가 실행한 실제 Pi 화면에서 CPU 53.5°C·Hailo 45.6°C 동시 조회를 확인했다. 이는 기본적으로 켜 둔 상태의 측정이며, 추론 중 동시 조회·온도·지연은 추가 확인해야 한다. [실측 화면과 진행 기록](../docs/2026-10-12_DH_실물셋업_진행기록_및_main_구성안.md)을 참고한다.
+조회 실패·시간 초과 시 해당 센서는 `N/A`와 오류를 표시하며, 이전 온도·회전수를 현재 값으로 재사용하지 않는다. 10월 16일 개선 후 호스트에서 관련 테스트 21개와 subtest 23개, Ruff·Mypy 검사를 통과했다. 팬 상태 구분, 장치 번호 변화, 화면 축소·한글 폭 처리, 반복 갱신 시 줄바꿈 없음, 종료 시 화면 복원을 검사했다. 새 대시보드 자체의 PuTTY 실기기 실행은 추가 확인이 필요하다.
+
+10월 12일 사용자 Pi 화면의 CPU 53.5°C·Hailo 45.6°C는 기본적으로 켜 둔 상태의 측정이다. 10월 16일에는 설치한 쿨러의 RPM 조회와 10초 최대 출력 시험을 별도로 확인했다. 추론 중 온도·지연은 추가 측정해야 한다. [12일 실측 화면](../docs/2026-10-12_DH_실물셋업_진행기록_및_main_구성안.md), [16일 추론·쿨러 점검 기록](../docs/2026-10-16_DH_AI_HAT_카메라_추론_및_쿨러_동작점검.md)을 참고한다.
 
 API 근거: [HailoRT 5.1.1 Device API](https://github.com/hailo-ai/hailort/blob/v5.1.1/hailort/libhailort/include/hailo/device.hpp), [온도 필드와 -1 누락값 정의](https://github.com/hailo-ai/hailort/blob/v5.1.1/hailort/libhailort/include/hailo/hailort.h).
 
@@ -59,11 +76,11 @@ API 근거: [HailoRT 5.1.1 Device API](https://github.com/hailo-ai/hailort/blob/
 
 ### 2026-10-16 custom HEF 첫 실행과 SDK 수정
 
-사용자 Pi의 HailoRT·펌웨어 5.1.1, HAILO10H에서 해수의 `best.hef`를 `parse-hef`로 읽었다. 입력은 NHWC UINT8 640×640×3, 출력은 18개 클래스의 Hailo NMS BY CLASS로 확인했다. 실제 모델 생성·추론은 별도 확인이 필요하다.
+사용자 Pi의 HailoRT·펌웨어 5.1.1, HAILO10H에서 해수의 `best.hef`를 `parse-hef`로 읽었다. 입력은 NHWC UINT8 640×640×3, 출력은 18개 클래스의 Hailo NMS BY CLASS로 확인했다. 아래 두 오류를 수정한 뒤 실제 모델 생성과 카메라 추론을 확인했다.
 
 첫 Python 로딩은 `Device`에 `identify`가 없어 중단됐다. 공통 실행기의 장치 확인을 HailoRT 5.1.1의 `physical.control.identify()`로 수정했다. 기존 테스트 대역도 `Device.identify`를 제공하던 잘못된 구조를 고쳤고, doctor의 장치 미생성 API 검사에 `Device.control`·`Control.identify`를 추가했다. [공식 Device·Control 구현](https://github.com/hailo-ai/hailort/blob/v5.1.1/hailort/libhailort/bindings/python/platform/hailo_platform/pyhailort/pyhailort.py)
 
-이 수정은 실제 오류를 해결하기 위한 API 변경이다. 호스트 검사만으로 Pi 추론 성공을 선언하지 않으며, 수정 파일을 받은 뒤 configure·카메라 추론을 다시 시험한다.
+이 수정은 실제 오류를 해결하기 위한 API 변경이다. 호스트 검사 후 수정 파일을 받은 Pi에서 모델 로딩과 카메라 추론을 다시 시험했다.
 
 이후 사용자가 제공한 traceback은 모델 생성과 추론 호출을 지나 좌표 복원에서 중단됐다. 정확한 원시 좌표는 아직 전달되지 않았다. 공식 HailoRT YOLOv8 decode는 박스를 모델 크기로 정규화하지만 경계에서 0 미만·1 초과 값을 만들 수 있다. 공통 코드의 엄격한 범위 검사도 이를 거부하므로 Hailo NMS 경로에서만 범위 초과를 허용하고 원본 영상 영역으로 잘라 복원하도록 수정했다. NaN·무한대·뒤집힌 좌표·잘못된 출력 구조는 계속 거부하고, 화면 밖·패딩뿐인 박스는 버린다. 픽셀 좌표를 크기만 보고 추측하여 변환하지 않는다. [HailoRT YOLOv8 decode](https://github.com/hailo-ai/hailort/blob/v5.1.1/hailort/libhailort/src/net_flow/ops/yolov8_post_process.cpp#L106)
 
@@ -74,7 +91,7 @@ source .venv/bin/activate
 timeout 60s python -u tools/check_hailo_camera.py
 ```
 
-`tools/check_hailo_camera.py`는 영상 창 없이 이름·신뢰도·정규화된 원본 좌표와 추론 호출 시간을 출력한다. 좌표 해석이 다시 실패하면 클래스당 원시 NMS 최대 3행을 출력하고 오류를 전파한다. 이 수정 후 실제 Pi의 재시험 결과는 아직 미확인이다.
+`tools/check_hailo_camera.py`는 영상 창 없이 이름·신뢰도·정규화된 원본 좌표와 추론 호출 시간을 출력한다. 좌표 해석이 다시 실패하면 클래스당 원시 NMS 최대 3행을 출력하고 오류를 전파한다. 관찰 시간을 늘리려면 `timeout 180s python -u tools/check_hailo_camera.py --frames 300`으로 실행한다. 10월 16일 실제 Pi 재시험에서는 152프레임까지 예외 없이 처리한 뒤 사용자가 Ctrl+C로 종료했다. 첫 프레임 이후 탐지 함수 처리 시간은 평균 약 13.6ms였으며, 매 프레임 0.3초 대기가 있어 전체 영상 FPS와는 다르다. 박스의 실제 위치·인식 정확도는 영상으로 추가 확인해야 한다. [실행 결과](../docs/2026-10-16_DH_AI_HAT_카메라_추론_및_쿨러_동작점검.md)
 
 - 카메라: CSI 카메라는 Picamera2, USB 카메라와 로컬 영상 파일은 OpenCV.
 - 물체 탐지: 기본값은 **Hailo-10H용 RGB YOLOv8n HEF**와 HailoRT. `detector: ultralytics`를 직접 선택하면 로컬 `.pt` 모델을 CPU에서 실행한다.
