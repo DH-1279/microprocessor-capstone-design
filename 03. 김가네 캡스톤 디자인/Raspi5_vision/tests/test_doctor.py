@@ -113,6 +113,32 @@ class DoctorTests(unittest.TestCase):
 
 
 class ImportProbeTests(unittest.TestCase):
+    def test_control_identify_contract_without_opening_a_device(self):
+        module_name = "doctor_hailo_double"
+        device_source = (
+            "class Device:\n"
+            "    def __init__(self):\n"
+            "        raise RuntimeError('device opened')\n"
+            "    @property\n"
+            "    def control(self):\n"
+            "        raise RuntimeError('control opened')\n"
+        )
+        for has_identify in (True, False):
+            with self.subTest(has_identify=has_identify), tempfile.TemporaryDirectory() as folder:
+                control_source = ("class Control:\n    def identify(self):\n"
+                                  "        raise RuntimeError('identify called')\n"
+                                  if has_identify else "class Control:\n    pass\n")
+                (Path(folder) / f"{module_name}.py").write_text(
+                    device_source + control_source, encoding="utf-8")
+                with patch.dict(os.environ, {"PYTHONPATH": folder}), \
+                     patch.dict("haptic_mvp.doctor._CONTRACTS", {
+                         module_name: ("Device.control", "Control.identify")}):
+                    ok, detail = _deep_import(module_name)
+                self.assertEqual(ok, has_identify, detail)
+                self.assertNotIn("device opened", detail)
+                self.assertNotIn("control opened", detail)
+                self.assertNotIn("identify called", detail)
+
     def test_real_child_import_and_attribute_check(self):
         with patch.dict("haptic_mvp.doctor._CONTRACTS", {"json": ("loads", "dumps")}):
             ok, detail = _deep_import("json")

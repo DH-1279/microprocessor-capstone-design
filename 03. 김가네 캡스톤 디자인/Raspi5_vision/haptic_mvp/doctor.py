@@ -25,6 +25,7 @@ _CONTRACTS = {
                        "VDevice.get_physical_devices", "FormatType.UINT8", "FormatType.FLOAT32",
                        "HailoSchedulingAlgorithm.ROUND_ROBIN"),
     "hailo_platform.pyhailort.pyhailort": ("FormatOrder.NHWC", "FormatOrder.HAILO_NMS_BY_CLASS",
+                                           "Device.control", "Control.identify",
                                            "ConfiguredInferModel.create_bindings", "ConfiguredInferModel.run",
                                            "InferModel.configure", "InferModel.set_batch_size"),
     "ultralytics": ("YOLO",),

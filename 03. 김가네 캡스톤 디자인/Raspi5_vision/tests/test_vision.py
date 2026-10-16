@@ -3,7 +3,7 @@
 No camera, Hailo or MediaPipe hardware is implied by passing these tests.
 """
 
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 import importlib.util
 from pathlib import Path
 import tempfile
@@ -235,11 +235,29 @@ class ArrayAdapterTests(unittest.TestCase):
         model = SimpleNamespace(inputs=[input_stream], outputs=[output], input=lambda: input_stream,
                                  output=lambda: output, set_batch_size=lambda size: None,
                                  configure=lambda: nullcontext(configured))
-        physical = SimpleNamespace(identify=lambda: SimpleNamespace(device_architecture="HAILO10H"))
-        device = SimpleNamespace(get_physical_devices=lambda: [nullcontext(physical)],
+        board = SimpleNamespace(device_architecture="HAILO10H")
+        # Deliberately has no Device.identify: that API is on Control in 5.1.1.
+        physical = SimpleNamespace(control=SimpleNamespace(identify=lambda: board))
+
+        @contextmanager
+        def physical_context():
+            try:
+                yield physical
+            finally:
+                entered.append("physical_released")
+
+        device = SimpleNamespace(get_physical_devices=lambda: [physical_context()],
                                   create_infer_model=lambda path: model)
+
+        @contextmanager
+        def device_context():
+            try:
+                yield device
+            finally:
+                entered.append("vdevice_released")
+
         vdevice_type = type("VDeviceDouble", (), {"create_params": staticmethod(SimpleNamespace),
-                                                "__new__": lambda cls, params: nullcontext(device)})
+                                                "__new__": lambda cls, params: device_context()})
         module = SimpleNamespace(VDevice=vdevice_type, FormatType=SimpleNamespace(UINT8="UINT8", FLOAT32="FLOAT32"),
                                   HailoSchedulingAlgorithm=SimpleNamespace(ROUND_ROBIN="ROUND_ROBIN"))
         formats = SimpleNamespace(FormatOrder=SimpleNamespace(NHWC="NHWC", HAILO_NMS_BY_CLASS="NMS"))
@@ -258,10 +276,27 @@ class ArrayAdapterTests(unittest.TestCase):
                 self.assertEqual(detected[0].box, (0, 0, 1, 1))
                 self.assertIn(("out", "FLOAT32"), entered)
                 self.assertIn(("run", 1500), entered)
+                self.assertEqual(entered.count("physical_released"), 1)
+                self.assertEqual(entered.count("vdevice_released"), 1)
                 output.is_nms = False
                 with self.assertRaisesRegex(ValueError, "NMS"):
                     with HailoDetector(config):
                         pass
+                self.assertEqual(entered.count("vdevice_released"), 2)
+
+                board.device_architecture = "HAILO8"
+                with self.assertRaisesRegex(ValueError, "detected HAILO8"):
+                    with HailoDetector(config):
+                        pass
+                self.assertEqual(entered.count("physical_released"), 3)
+                self.assertEqual(entered.count("vdevice_released"), 3)
+
+                with patch.object(physical.control, "identify", side_effect=RuntimeError("identify failed")):
+                    with self.assertRaisesRegex(RuntimeError, "identify failed"):
+                        with HailoDetector(config):
+                            pass
+                self.assertEqual(entered.count("physical_released"), 4)
+                self.assertEqual(entered.count("vdevice_released"), 4)
 
 
 if __name__ == "__main__":

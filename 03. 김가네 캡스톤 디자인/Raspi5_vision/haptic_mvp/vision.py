@@ -144,7 +144,8 @@ class HailoDetector:
                     physical.release()
                 raise ValueError("Expected one Hailo-10H device")
             with physical_devices[0] as physical:
-                architecture = str(physical.identify().device_architecture)
+                # HailoRT 5.1.1 exposes identification through Device.control.
+                architecture = str(physical.control.identify().device_architecture)
             if architecture != "HAILO10H":
                 raise ValueError(f"AI HAT+ 2 needs HAILO10H; detected {architecture}")
             self.model = device.create_infer_model(self.model_path)

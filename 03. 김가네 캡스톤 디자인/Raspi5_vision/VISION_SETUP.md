@@ -57,6 +57,14 @@ API 근거: [HailoRT 5.1.1 Device API](https://github.com/hailo-ai/hailort/blob/
 
 ## 지원 범위와 검증 상태
 
+### 2026-10-16 custom HEF 첫 실행과 SDK 수정
+
+사용자 Pi의 HailoRT·펌웨어 5.1.1, HAILO10H에서 해수의 `best.hef`를 `parse-hef`로 읽었다. 입력은 NHWC UINT8 640×640×3, 출력은 18개 클래스의 Hailo NMS BY CLASS로 확인했다. 실제 모델 생성·추론은 별도 확인이 필요하다.
+
+첫 Python 로딩은 `Device`에 `identify`가 없어 중단됐다. 공통 실행기의 장치 확인을 HailoRT 5.1.1의 `physical.control.identify()`로 수정했다. 기존 테스트 대역도 `Device.identify`를 제공하던 잘못된 구조를 고쳤고, doctor의 장치 미생성 API 검사에 `Device.control`·`Control.identify`를 추가했다. [공식 Device·Control 구현](https://github.com/hailo-ai/hailort/blob/v5.1.1/hailort/libhailort/bindings/python/platform/hailo_platform/pyhailort/pyhailort.py)
+
+이 수정은 실제 오류를 해결하기 위한 API 변경이다. 호스트 검사만으로 Pi 추론 성공을 선언하지 않으며, 수정 파일을 받은 뒤 configure·카메라 추론을 다시 시험한다.
+
 - 카메라: CSI 카메라는 Picamera2, USB 카메라와 로컬 영상 파일은 OpenCV.
 - 물체 탐지: 기본값은 **Hailo-10H용 RGB YOLOv8n HEF**와 HailoRT. `detector: ultralytics`를 직접 선택하면 로컬 `.pt` 모델을 CPU에서 실행한다.
 - 손 추적: MediaPipe Tasks Hand Landmarker CPU 실행. 로컬 `.task` 모델 파일을 사용한다.
