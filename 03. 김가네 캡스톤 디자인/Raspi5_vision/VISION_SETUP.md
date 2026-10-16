@@ -65,6 +65,17 @@ API 근거: [HailoRT 5.1.1 Device API](https://github.com/hailo-ai/hailort/blob/
 
 이 수정은 실제 오류를 해결하기 위한 API 변경이다. 호스트 검사만으로 Pi 추론 성공을 선언하지 않으며, 수정 파일을 받은 뒤 configure·카메라 추론을 다시 시험한다.
 
+이후 사용자가 제공한 traceback은 모델 생성과 추론 호출을 지나 좌표 복원에서 중단됐다. 정확한 원시 좌표는 아직 전달되지 않았다. 공식 HailoRT YOLOv8 decode는 박스를 모델 크기로 정규화하지만 경계에서 0 미만·1 초과 값을 만들 수 있다. 공통 코드의 엄격한 범위 검사도 이를 거부하므로 Hailo NMS 경로에서만 범위 초과를 허용하고 원본 영상 영역으로 잘라 복원하도록 수정했다. NaN·무한대·뒤집힌 좌표·잘못된 출력 구조는 계속 거부하고, 화면 밖·패딩뿐인 박스는 버린다. 픽셀 좌표를 크기만 보고 추측하여 변환하지 않는다. [HailoRT YOLOv8 decode](https://github.com/hailo-ai/hailort/blob/v5.1.1/hailort/libhailort/src/net_flow/ops/yolov8_post_process.cpp#L106)
+
+이미 `/tmp/kimgane-khs-check/best.hef`와 순서가 맞는 `labels.txt`를 준비했다면 PuTTY에서도 다음 명령으로 10프레임을 시험할 수 있다. 기본 입력은 설정의 Picamera2이며 손 인식·음성·controller·BLE를 시작하지 않는다. 다른 경로는 `--model`, `--labels`로 지정한다. `/tmp` 파일이 사라졌으면 모델·라벨부터 다시 준비한다.
+
+```bash
+source .venv/bin/activate
+timeout 60s python -u tools/check_hailo_camera.py
+```
+
+`tools/check_hailo_camera.py`는 영상 창 없이 이름·신뢰도·정규화된 원본 좌표와 추론 호출 시간을 출력한다. 좌표 해석이 다시 실패하면 클래스당 원시 NMS 최대 3행을 출력하고 오류를 전파한다. 이 수정 후 실제 Pi의 재시험 결과는 아직 미확인이다.
+
 - 카메라: CSI 카메라는 Picamera2, USB 카메라와 로컬 영상 파일은 OpenCV.
 - 물체 탐지: 기본값은 **Hailo-10H용 RGB YOLOv8n HEF**와 HailoRT. `detector: ultralytics`를 직접 선택하면 로컬 `.pt` 모델을 CPU에서 실행한다.
 - 손 추적: MediaPipe Tasks Hand Landmarker CPU 실행. 로컬 `.task` 모델 파일을 사용한다.

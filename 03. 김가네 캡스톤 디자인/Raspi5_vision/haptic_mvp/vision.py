@@ -41,15 +41,22 @@ def letterbox_geometry(width: int, height: int, model_width: int, model_height: 
                      (model_height - resized_height) // 2)
 
 
-def restore_box(yxyx: Any, geometry: Letterbox) -> tuple[float, float, float, float] | None:
-    """Undo rounded resize + letterbox; reject padding-only and invalid boxes."""
+def restore_box(yxyx: Any, geometry: Letterbox, *,
+                allow_model_overflow: bool = False) -> tuple[float, float, float, float] | None:
+    """Undo letterbox and clip to the original image; reject invalid boxes.
+
+    Hailo YOLOv8 uses normalized units but can decode edges beyond 0..1.
+    Only its checked NMS adapter opts in; other callers retain strict bounds.
+    """
     if len(yxyx) != 4:
         raise ValueError("Expected four normalized yxyx coordinates")
     ymin, xmin, ymax, xmax = (float(value) for value in yxyx)
     if not all(math.isfinite(v) for v in (ymin, xmin, ymax, xmax)):
         raise ValueError("Detection coordinates must be finite")
-    if not (0 <= xmin <= xmax <= 1 and 0 <= ymin <= ymax <= 1):
-        raise ValueError("Expected normalized, ordered NMS coordinates")
+    if xmin > xmax or ymin > ymax:
+        raise ValueError(f"Expected ordered NMS coordinates, got {ymin, xmin, ymax, xmax}")
+    if not allow_model_overflow and not all(0 <= value <= 1 for value in (ymin, xmin, ymax, xmax)):
+        raise ValueError(f"Expected normalized NMS coordinates within 0..1, got {ymin, xmin, ymax, xmax}")
     g = geometry
     x1 = (xmin * g.model_width - g.left) / g.resized_width
     x2 = (xmax * g.model_width - g.left) / g.resized_width
@@ -78,7 +85,9 @@ def decode_hailo_nms(raw: Any, labels: tuple[str, ...], geometry: Letterbox,
                 raise ValueError("Detection confidence must be finite and within 0..1")
             if score < threshold:
                 continue
-            box = restore_box(row[:4], geometry)
+            # HailoRT YOLOv8 decode does not clamp image-edge predictions.
+            # Values remain in model-normalized units; never guess pixel units.
+            box = restore_box(row[:4], geometry, allow_model_overflow=True)
             if box is not None:
                 found.append(Detection(label=label, box=box, score=score))
     return tuple(sorted(found, key=lambda item: item.score, reverse=True)[:max_objects])

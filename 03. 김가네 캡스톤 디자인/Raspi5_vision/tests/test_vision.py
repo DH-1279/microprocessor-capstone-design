@@ -68,6 +68,44 @@ class GeometryTests(unittest.TestCase):
         self.assertEqual(len(decode_hailo_nms(raw, ("cup",), letterbox_geometry(1, 1, 1, 1),
                                             max_objects=1)), 1)
 
+    def test_hailo_yolov8_edge_predictions_use_normalized_units_outside_image(self):
+        # HailoRT 5.1.1 decode: center +/- distance * stride / image_size.
+        # A valid edge cell can therefore produce negative minima.
+        size, stride = 640, 32
+        center = 0.5 * stride / size
+        minimum = center - 2 * stride / size
+        maximum = center + 4 * stride / size
+        raw = [[[minimum, minimum, maximum, maximum, 0.9]]]
+        detected = decode_hailo_nms(raw, ("cup",), letterbox_geometry(size, size, size, size))
+        self.assertEqual(detected[0].box, (0, 0, maximum, maximum))
+
+    def test_hailo_overflow_restores_landscape_and_portrait_then_clips(self):
+        raw = [[[-0.03, -0.02, 1.04, 1.05, 0.9]]]
+        for width, height in ((640, 480), (480, 640)):
+            with self.subTest(width=width, height=height):
+                detected = decode_hailo_nms(raw, ("cup",), letterbox_geometry(width, height, 640, 640))
+                self.assertEqual(detected[0].box, (0, 0, 1, 1))
+
+    def test_hailo_overflow_preserves_visible_partial_box_geometry(self):
+        raw = [[[-0.05, 0.2, 0.5, 0.8, 0.9]]]
+        detected = decode_hailo_nms(raw, ("cup",), letterbox_geometry(640, 480, 640, 640))
+        self.assertEqual(detected[0].box, (0.2, 0, 0.8, 0.5))
+
+    def test_hailo_boxes_wholly_outside_original_image_are_discarded(self):
+        for row in ((-0.2, 0.1, -0.1, 0.3, 0.9), (1.1, 0.2, 1.2, 0.5, 0.9),
+                    (0.2, -0.2, 0.5, -0.1, 0.9), (0.2, 1.1, 0.5, 1.2, 0.9),
+                    (-0.1, 0.1, 0.1, 0.3, 0.9), (0.4, 0.5, 0.4, 0.6, 0.9)):
+            with self.subTest(row=row):
+                self.assertEqual(decode_hailo_nms([[row]], ("cup",),
+                                                letterbox_geometry(640, 480, 640, 640)), ())
+
+    def test_hailo_overflow_does_not_accept_nan_infinity_or_reversed_edges(self):
+        for row in ((float("nan"), 0.1, 0.8, 0.9, 0.9),
+                    (0.1, 0.2, float("inf"), 0.9, 0.9),
+                    (0.8, 0.1, -0.1, 0.9, 0.9), (0.1, 1.2, 0.8, -0.1, 0.9)):
+            with self.subTest(row=row), self.assertRaises(ValueError):
+                decode_hailo_nms([[row]], ("cup",), letterbox_geometry(640, 480, 640, 640))
+
     def test_nms_rejects_missing_classes_extra_batch_raw_heads(self):
         for raw in ([], [[[[0, 0, 1, 1, 0.8]]]], [[[0, 0, 1, 1, 0.8, 7]]]):
             with self.subTest(raw=raw), self.assertRaises((ValueError, TypeError)):
