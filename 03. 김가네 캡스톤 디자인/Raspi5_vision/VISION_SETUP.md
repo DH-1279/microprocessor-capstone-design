@@ -99,6 +99,38 @@ timeout 60s python -u tools/check_hailo_camera.py
 - 모든 모델은 같은 RGB 프레임에서 실행한다. Hailo 입력에 추가한 여백을 제거한 뒤 원본 영상의 정규화 좌표로 복구한다.
 - 호스트에서는 좌표 복원, 잘못된 NMS 출력 거부, 손 선택, 최신 프레임 교체, SDK 대역을 통한 호출을 시험했다. **실제 CSI 카메라·Hailo-10H·장갑을 낀 손에 대한 인식률과 FPS는 아직 측정하지 않았다.**
 
+### 2026-10-17 HDMI 모니터에서 물체 탐지 확인
+
+Pi에 연결한 모니터에 바탕화면이 보이는 환경에서, **그 바탕화면의 터미널**을 열어 실행한다. PuTTY SSH 터미널의 화면과 구분한다. 기존 카메라 시험이 실행 중이면 먼저 종료한다.
+
+카메라 영상만 확인하려면 `rpicam-hello -t 0`으로 보고 Ctrl+C로 종료한다. 아래 점검 도구를 실행하기 전에 카메라 프로그램을 닫는다.
+
+`tools/check_hailo_camera.py --preview`는 공통 HailoDetector와 CameraSource만 사용해 물체 박스·라벨·점수를 표시한다. 손 `.task`, 음성, 목표 선택, BLE는 필요하지 않다. 기존 텍스트 모드는 기본 10프레임이며, 미리보기는 기본적으로 종료 키를 누를 때까지 계속한다. `--frames 100`처럼 지정하면 미리보기에도 프레임 제한을 적용할 수 있다.
+
+프로젝트 폴더에서 실행할 명령이다. `/tmp`가 비었어도 실행할 수 있도록, 16일에 실측한 해수 모델과 라벨을 고정 커밋에서 다시 준비한다. 원격 브랜치를 fetch하여 해당 커밋이 로컬 Git에 있어야 한다.
+
+```bash
+source .venv/bin/activate
+mkdir -p /tmp/kimgane-khs-check
+git show 'd96d859621cf353c0c9aca11e521626319d2a93a:03. 김가네 캡스톤 디자인/Raspi5_vision/KHS_object_detection/best_hailo_model/best.hef' > /tmp/kimgane-khs-check/best.hef
+git show 'd96d859621cf353c0c9aca11e521626319d2a93a:03. 김가네 캡스톤 디자인/Raspi5_vision/KHS_object_detection/labels.json' | python3 -c 'import json,sys; d=json.load(sys.stdin); print("\n".join(d[str(i)] for i in range(len(d))))' > /tmp/kimgane-khs-check/labels.txt
+python -u tools/check_hailo_camera.py --preview
+```
+
+화면을 보며 **표시된 이름과 실제 물체가 맞는지, 박스가 해당 물체 위치에 맞는지** 확인한다.
+
+영상 창을 클릭하고 `q` 또는 Esc를 누르거나, 실행한 터미널에서 Ctrl+C를 누르면 종료한다.
+
+미리보기는 0.3초의 텍스트 모드 대기를 넣지 않는다. 화면의 `detect ... ms`는 탐지 함수의 처리 시간이며 전체 영상 FPS가 아니다. 원본 RGB는 추론에 사용하고, 표시용 사본만 BGR로 변환해 그리므로 물체 입력에 박스가 섞이지 않는다.
+
+Linux에서 `DISPLAY`·`WAYLAND_DISPLAY`가 모두 없으면 바탕화면 터미널에서 실행하도록 안내한다. OpenCV가 GUI 없는 빌드이면 모델을 열기 전에 오류를 표시한다. 이 경우 다음 정보부터 확인하고 가상환경의 OpenCV를 임의로 삭제·재설치하지 않는다.
+
+```bash
+python -c "import cv2; print(cv2.__version__, cv2.__file__); print(cv2.getBuildInformation())"
+```
+
+호스트에서 도구·기존 비전 테스트 42개와 subtest 29개, Ruff·Mypy 검사를 통과했다. Pi HDMI 환경에서 실제 창 표시·박스 정확도는 사용자 실행으로 확인해야 한다. GUI API는 [OpenCV HighGUI 공식 문서](https://docs.opencv.org/4.x/d7/dfc/group__highgui.html)를 참고한다.
+
 ## 1. Pi OS와 HAT 확인
 
 공식 가이드 기준은 **Raspberry Pi 5 + 64-bit Raspberry Pi OS Trixie**다. 먼저 다음 정보부터 확인한다.
