@@ -129,7 +129,39 @@ Linux에서 `DISPLAY`·`WAYLAND_DISPLAY`가 모두 없으면 바탕화면 터미
 python -c "import cv2; print(cv2.__version__, cv2.__file__); print(cv2.getBuildInformation())"
 ```
 
-호스트에서 도구·기존 비전 테스트 42개와 subtest 29개, Ruff·Mypy 검사를 통과했다. Pi HDMI 환경에서 실제 창 표시·박스 정확도는 사용자 실행으로 확인해야 한다. GUI API는 [OpenCV HighGUI 공식 문서](https://docs.opencv.org/4.x/d7/dfc/group__highgui.html)를 참고한다.
+호스트에서 도구·기존 비전 테스트 42개와 subtest 29개, Ruff·Mypy 검사를 통과했다. 이후 아래 11클래스 모델의 실제 Pi 실행과 출력 예외를 확인했다. GUI API는 [OpenCV HighGUI 공식 문서](https://docs.opencv.org/4.x/d7/dfc/group__highgui.html)를 참고한다.
+
+### 2026-10-17 새 11클래스 모델과 연속 미리보기 수정
+
+해수 커밋 `a0b2d5da318fab22da67dbc5f10895db9f907689`은 HEF·metadata·NMS 설정·라벨을 교체했다. 새 HEF는 4,530,176바이트이며 SHA-256은 `350fc70ae9ee54325209a1facd2c0bb20da4af9d21d0772f694b97789610f09d`다. 바이너리 내부 NMS 클래스 수와 metadata·라벨의 11개 순서가 일치함을 확인했다.
+
+```text
+Earbud, bottle, cell phone, cup, remote, Glasses,
+Medicine, key, Pen, Tumbler, Wallet
+```
+
+사용자 Pi의 `parse-hef`는 HAILO15H/HAILO10H 호환, NHWC UINT8 640×640×3 입력과 FLOAT32 HAILO NMS BY CLASS 11개 출력을 표시했다. 모델 생성과 실제 카메라 추론도 진행됐다. 첫 탐지 함수 처리 시간은 30.1ms, 이후 출력된 표본은 약 13ms였다. PuTTY에서 `DISPLAY=:0`, 사용자 `XDG_RUNTIME_DIR`를 지정하여 실행했으며, Qt 폰트 경고 후에도 모델·카메라 초기화와 추론이 계속됐다.
+
+390프레임 로그 이후 다음 원시 출력 때문에 범위 검사에서 중단됐다. 프레임 수 제한이나 `parse-hef`에만 적용한 20초 timeout으로 끝난 것이 아니다.
+
+```text
+Earbud: [0.13029966, 0.00030338764, 0.87358201, 0.99982202, 1.0005449]
+ValueError: Detection confidence must be finite and within 0..1
+```
+
+마지막 값이 신뢰도다. 1을 넘은 출력을 관측했지만, 이 값을 만든 학습·변환·실행 단계의 정확한 원인은 아직 확정하지 않았다. 영상에 나온 물체와 실제 박스의 일치 여부도 별도 확인이 필요하다.
+
+미리보기 도구는 `--preview`에서 결과 검증 `ValueError`가 나면 **그 프레임의 탐지 결과 전체를 폐기**하고, 원본 영상에 빨간 `INVALID OUTPUT - detections discarded` 경고를 표시하며 다음 프레임으로 계속한다. 이전 프레임의 박스를 재사용하거나 범위 밖 신뢰도를 1로 보정하지 않는다. 정상 출력이 돌아오면 정상 박스를 다시 표시한다. 오류 횟수를 집계하고 원시 표본 로그는 최대 2초마다 출력한다. 기본 미리보기에는 프레임 수 제한이 없으며 q·Esc·Ctrl+C로 종료한다.
+
+이 동작은 손·음성·BLE 없이 영상을 관찰하는 도구에 한정된다. 공통 NMS 검증은 유지하며 텍스트 점검은 계속 오류를 전파한다. 장치 오류·카메라 실패까지 무시하는 방식도 아니다. 실제 오류 행을 사용한 폐기·복구 테스트와 기존 비전 테스트 총 47개 및 subtest 29개, Ruff·Mypy 검사를 통과했다. 수정 후 Pi에서의 장시간 실행은 추가 확인해야 한다.
+
+위 새 모델과 라벨을 `$HOME/.cache/kimgane-haptic/khs11-a0b2d5d`에 준비한 경우, 같은 PuTTY 터미널의 화면 연결 설정을 유지하고 다음 명령으로 실행한다.
+
+```bash
+python -u tools/check_hailo_camera.py --preview \
+  --model "$HOME/.cache/kimgane-haptic/khs11-a0b2d5d/best.hef" \
+  --labels "$HOME/.cache/kimgane-haptic/khs11-a0b2d5d/labels.txt"
+```
 
 ## 1. Pi OS와 HAT 확인
 

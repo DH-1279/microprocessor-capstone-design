@@ -29,7 +29,8 @@ def preview_window(enabled):
         yield None
         return
     if sys.platform.startswith("linux") and not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
-        raise RuntimeError("영상 창은 라즈베리파이 바탕화면의 터미널에서 실행하세요. PuTTY에서는 --preview를 빼세요.")
+        raise RuntimeError("화면 연결 정보가 없습니다. Pi 바탕화면 터미널에서 실행하거나, "
+                           "PuTTY에서 로그인된 바탕화면의 DISPLAY 또는 WAYLAND_DISPLAY를 지정하세요.")
     import cv2
 
     if hasattr(cv2, "currentUIFramework") and not cv2.currentUIFramework():
@@ -41,7 +42,7 @@ def preview_window(enabled):
         cv2.destroyAllWindows()
 
 
-def show_preview(cv2, rgb, objects, elapsed):
+def show_preview(cv2, rgb, objects, elapsed, invalid=False):
     # Convert a copy for OpenCV; never draw on the RGB inference input.
     frame = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
     height, width = frame.shape[:2]
@@ -52,10 +53,23 @@ def show_preview(cv2, rgb, objects, elapsed):
         cv2.rectangle(frame, first, last, (0, 255, 0), 2)
         cv2.putText(frame, f"{obj.label} {obj.score:.2f}", (first[0], max(18, first[1] - 6)),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
-    cv2.putText(frame, f"detect {elapsed:.1f} ms | objects {len(objects)} | q/Esc: quit", (8, height - 10),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
+    status = ("INVALID OUTPUT - detections discarded | q/Esc: quit" if invalid else
+              f"detect {elapsed:.1f} ms | objects {len(objects)} | q/Esc: quit")
+    cv2.putText(frame, status, (8, height - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.45,
+                (0, 0, 255) if invalid else (255, 255, 255), 1)
     cv2.imshow(WINDOW, frame)
     return cv2.waitKey(1) & 0xFF in (ord("q"), 27)
+
+
+def report_invalid_output(detector, error, index):
+    print(f"탐지 결과 검증 실패 (프레임 {index}): {error}", flush=True)
+    try:
+        raw = detector.bindings.output().get_buffer(tf_format=False)
+        for label, rows in zip(detector.labels, raw):
+            if len(rows):
+                print(label, repr(rows[:3]), flush=True)
+    except Exception as diagnostic_error:
+        print(f"원시 결과 조회 실패: {diagnostic_error}", flush=True)
 
 
 def frame_count(value: str) -> int:
@@ -80,6 +94,7 @@ def main(argv=None) -> int:
     config = dict(load_config()["vision"])
     config.update(object_model=str(args.model.resolve()), labels_file=str(args.labels.resolve()))
     print("HAT에 모델을 로딩합니다.", flush=True)
+    invalid_frames, last_report = 0, float("-inf")
     try:
         with preview_window(args.preview) as preview, HailoDetector(config) as detector:
             print(f"모델 로딩 성공 | 입력 {detector.model_width}×{detector.model_height} | "
@@ -91,36 +106,39 @@ def main(argv=None) -> int:
                         raise RuntimeError("카메라 프레임이 없습니다.")
                     rgb, _ = item
                     started = time.perf_counter()
+                    invalid = False
                     try:
                         objects = detector.detect(rgb)
-                    except ValueError:
-                        # Diagnostic only: never substitute malformed results.
-                        print("좌표 해석 실패: 원시 NMS 표본을 출력합니다.", flush=True)
-                        try:
-                            raw = detector.bindings.output().get_buffer(tf_format=False)
-                            for label, rows in zip(detector.labels, raw):
-                                if len(rows):
-                                    print(label, repr(rows[:3]), flush=True)
-                        except Exception as error:
-                            print(f"원시 결과 조회 실패: {error}", flush=True)
-                        raise
+                    except ValueError as error:
+                        invalid_frames += 1
+                        now = time.monotonic()
+                        if preview is None or now - last_report >= 2:
+                            report_invalid_output(detector, error, index)
+                            last_report = now
+                        if preview is None:
+                            raise
+                        # Visual inspection may continue, but no predictions from
+                        # this frame are trusted, clamped or reused from the past.
+                        objects, invalid = (), True
                     elapsed = (time.perf_counter() - started) * 1000
                     if preview is None or index == 1 or index % 30 == 0:
                         progress = f"{index}/{limit}" if limit is not None else str(index)
-                        print(f"프레임 {progress} | 추론 {elapsed:.1f}ms | 탐지 {len(objects)}개", flush=True)
+                        status = "결과 폐기" if invalid else f"탐지 {len(objects)}개"
+                        print(f"프레임 {progress} | 추론 {elapsed:.1f}ms | {status} | "
+                              f"검증 실패 누적 {invalid_frames}", flush=True)
                         for obj in objects:
                             box = tuple(round(value, 3) for value in obj.box)
                             print(f"  {obj.label} | 신뢰도 {obj.score:.2f} | 좌표 {box}", flush=True)
-                    if preview is not None and show_preview(preview, rgb, objects, elapsed):
+                    if preview is not None and show_preview(preview, rgb, objects, elapsed, invalid=invalid):
                         break
                     if limit is not None and index >= limit:
                         break
                     if preview is None:
                         time.sleep(0.3)
     except KeyboardInterrupt:
-        print("\n사용자 요청으로 점검을 중단했습니다.", flush=True)
+        print(f"\n사용자 요청으로 점검을 중단했습니다. 검증 실패 {invalid_frames}프레임", flush=True)
         return 130
-    print("카메라·HAT 단독 시험 종료", flush=True)
+    print(f"카메라·HAT 단독 시험 종료 | 검증 실패 {invalid_frames}프레임", flush=True)
     return 0
 
 
