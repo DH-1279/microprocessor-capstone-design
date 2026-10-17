@@ -85,6 +85,7 @@ def main(argv=None) -> int:
     parser.add_argument("--labels", type=Path, default=Path("/tmp/kimgane-khs-check/labels.txt"))
     parser.add_argument("--frames", type=frame_count, help="1~300; 기본은 텍스트 10프레임, 미리보기는 종료 키까지")
     parser.add_argument("--preview", action="store_true", help="Pi 바탕화면에 탐지 박스·이름 표시 (q/Esc 종료)")
+    parser.add_argument("--full-fov", action="store_true", help="센서 최대 영역과 원래 비율 사용 (CSI 전용)")
     args = parser.parse_args(argv)
     limit = args.frames if args.frames is not None else None if args.preview else 10
     for path in (args.model, args.labels):
@@ -99,7 +100,9 @@ def main(argv=None) -> int:
         with preview_window(args.preview) as preview, HailoDetector(config) as detector:
             print(f"모델 로딩 성공 | 입력 {detector.model_width}×{detector.model_height} | "
                   f"클래스 {len(detector.labels)}개", flush=True)
-            with CameraSource(config) as camera:
+            with CameraSource(config, full_fov=args.full_fov) as camera:
+                if args.full_fov:
+                    print(f"FULL FOV | {camera.full_fov_info}", flush=True)
                 for index in count(1):
                     item = camera.read()
                     if item is None:

@@ -163,6 +163,26 @@ python -u tools/check_hailo_camera.py --preview \
   --labels "$HOME/.cache/kimgane-haptic/khs11-a0b2d5d/labels.txt"
 ```
 
+### 2026-10-17 중앙 크롭으로 좁아 보이는 화각 조정
+
+기존 Pi 로그는 `1536×864` 센서 모드에서 `640×480` 프레임을 출력했다. 앞서 사용자가 제공한 IMX708 모드 목록에서 해당 모드의 센서 영역은 `(768, 432, 3072, 1728)`이며 전체 `(0, 0, 4608, 2592)`보다 좁다. 또한 16:9 센서 영상을 4:3으로 비율을 유지해 출력하면 가로 영역이 더 잘릴 수 있다. 명시적인 디지털 줌 명령이 없어도 센서 모드 선택 때문에 확대된 것처럼 보일 수 있다.
+
+`--full-fov`를 추가하면 Picamera2의 `sensor_modes`에서 `crop_limits` 면적이 최대인 모드를 먼저 찾고, 요청한 FPS를 지원하는 것 중 가장 작은 센서 해상도를 사용한다. 보고된 IMX708 모드 표와 기본 15FPS에서는 `2304×1296` 모드를 선택한다. `4608×2592` 원본 모드를 매번 읽을 필요는 없다. 최대 영역 모드가 요청 FPS를 지원하지 않으면 중앙 크롭 모드로 몰래 전환하지 않고 오류를 낸다.
+
+이 옵션은 센서 영역의 화면 비율도 유지하므로 해당 카메라에서는 출력이 `640×360`이 된다. 구성 후 최대 `ScalerCrop`을 요청하고 선택된 센서 모드·crop·출력 크기를 `FULL FOV` 로그로 보여준다. HEF 입력은 기존 640×640으로 유지하며 공통 letterbox 전처리를 사용한다. 옵션을 생략하면 기존 640×480 자동 센서 선택을 유지한다.
+
+```bash
+python -u tools/check_hailo_camera.py --preview --full-fov \
+  --model "$HOME/.cache/kimgane-haptic/khs11-a0b2d5d/best.hef" \
+  --labels "$HOME/.cache/kimgane-haptic/khs11-a0b2d5d/labels.txt"
+```
+
+예상 시작 정보는 센서 `(2304, 1296)`, crop `(0, 0, 4608, 2592)`, 출력 `(640, 360)`이다. 실제 Pi에서 이 로그와 영상을 확인한다. 카메라 위치를 고정한 채 옵션 유무에 따라 화면 가장자리에 보이는 물체를 비교하면 된다. 렌즈 자체가 담지 못한 범위를 소프트웨어로 만들어낼 수는 없으므로, 센서 전체 영역을 써도 좁으면 설치 거리를 늘리는 등의 배치를 검토한다.
+
+이번 옵션은 카메라·HAT 단독 점검용이다. 공통 MVP 설정은 변경하지 않았으며, 이후 전체 실행기에 16:9 출력을 적용하려면 `vision.width/height`와 `controller.image_aspect`도 함께 맞춰야 한다. 호스트의 센서 모드 선택·카메라 자원 정리·기존 비전·미리보기 테스트 55개와 subtest 29개 및 Ruff·Mypy 검사를 통과했다. 수정 후 실제 Pi의 화각 변화는 아직 미확인이다.
+
+API 근거: [Picamera2 공식 매뉴얼](https://datasheets.raspberrypi.com/camera/picamera2-manual.pdf)의 sensor modes, sensor configuration, ScalerCropMaximum 설명.
+
 ## 1. Pi OS와 HAT 확인
 
 공식 가이드 기준은 **Raspberry Pi 5 + 64-bit Raspberry Pi OS Trixie**다. 먼저 다음 정보부터 확인한다.
