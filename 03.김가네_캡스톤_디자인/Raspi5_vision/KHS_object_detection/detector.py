@@ -121,13 +121,16 @@ if __name__ == "__main__":
     # Hailo 앱에서 제공하는 기본 파서 사용
     parser = get_pipeline_parser()
 
-    # 기본 모델 대신 사용자 모델 경로 지정
+    # 터미널에서 찾은 실제 .so 파일 경로
+    actual_post_so_path = "/usr/lib/aarch64-linux-gnu/hailo/tappas/post_processes/libyolo_hailortpp_post.so"
+
+    # 기본 모델 대신 사용자 모델 경로 및 후처리 파일 지정
     parser.set_defaults(
         hef_path=default_hef_path,
         labels_json=default_labels_path,
         network="yolov8n",
+        post_so=actual_post_so_path  # 실제 라이브러리 경로 강제 주입
     )
-
     # 명령행 인자 파싱
     args = parser.parse_args()
 
