@@ -65,6 +65,11 @@ class KHS_DetectorApp(GStreamerDetectionApp):
         # NMS 후처리 직후 단계("identity" 패드)에 위에서 만든 콜백 함수를 끼워 넣습니다.
         self.add_probe("identity", app_callback)
 
+# GStreamer 앱 내부 속성 요구사항을 맞추기 위한 UserData 클래스
+class UserData:
+    def __init__(self):
+        self.use_frame = False
+
 # 단독 실행 및 검증 블록
 if __name__ == "__main__":
     import argparse
@@ -78,6 +83,9 @@ if __name__ == "__main__":
     
     print("[KHS_Detector] NPU 추론 엔진 가동 시작... (종료하려면 Ctrl+C)")
     
+    # 사용자 데이터 인스턴스 생성 및 전달
+    user_data = UserData()
+    
     # 앱 실행
-    app = KHS_DetectorApp(args, user_data=None)
+    app = KHS_DetectorApp(args, user_data=user_data)
     app.run() # 무한 루프를 돌며 백그라운드에서 카메라와 NPU가 동작합니다.
