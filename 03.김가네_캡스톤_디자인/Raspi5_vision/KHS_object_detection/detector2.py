@@ -18,12 +18,16 @@ import hailo
 # =====================================================================
 # 2. 파일 구조에 맞춘 자동 경로 설정
 # =====================================================================
-# 현재 스크립트(main.py)가 위치한 KHS_object_detection 디렉토리의 절대 경로
+# 현재 스크립트가 위치한 KHS_object_detection 디렉토리의 절대 경로
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# 하위 폴더인 best_hailo_model 내부의 best.hef 파일 지정
+# 모델 및 설정 파일 경로 지정
 MODEL_PATH = os.path.join(CURRENT_DIR, "best_hailo_model", "best.hef")
+CONFIG_PATH = os.path.join(CURRENT_DIR, "best_hailo_model", "nms_config.json")
 LABELS_PATH = os.path.join(CURRENT_DIR, "labels.json")
+
+# 라즈베리파이5 Hailo 기본 YOLO 후처리 라이브러리(C++) 절대 경로
+SO_PATH = "/usr/lib/aarch64-linux-gnu/hailo/tappas/post_processes/libyolo_hailort.so"
 
 # 라벨 JSON 파일 읽기 (클래스 ID에 해당하는 이름을 가져오기 위함)
 class_labels = {}
@@ -102,12 +106,18 @@ def main():
     if not os.path.exists(MODEL_PATH):
         print(f"오류: 모델 파일을 찾을 수 없습니다! 경로를 확인하세요: {MODEL_PATH}")
         return
+        
+    if not os.path.exists(CONFIG_PATH):
+        print(f"경고: nms_config.json 파일을 찾을 수 없습니다: {CONFIG_PATH}")
 
+    # GStreamer 파이프라인 구성
     pipeline_str = f"""
-        libcamerasrc ! video/x-raw, width=640, height=480, format=RGB ! 
+        libcamerasrc ! video/x-raw, width=640, height=480 ! 
         videoconvert ! 
+        videoscale ! 
+        video/x-raw, format=RGB ! 
         hailonet hef-path={MODEL_PATH} ! 
-        hailofilter ! 
+        hailofilter so-path={SO_PATH} config-path={CONFIG_PATH} qos=false ! 
         videoconvert ! video/x-raw, format=RGB ! 
         identity name=cb_probe ! 
         hailooverlay ! 
