@@ -125,6 +125,7 @@ if __name__ == "__main__":
     parser.set_defaults(
         hef_path=default_hef_path,
         labels_json=default_labels_path,
+        network="yolov8n",
     )
 
     # 명령행 인자 파싱
