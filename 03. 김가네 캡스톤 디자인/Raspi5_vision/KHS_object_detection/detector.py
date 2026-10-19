@@ -1,3 +1,4 @@
+import os
 import gi
 gi.require_version('Gst', '1.0')
 from gi.repository import Gst
@@ -74,10 +75,15 @@ class UserData:
 if __name__ == "__main__":
     import argparse
     
+    # 현재 스크립트 위치 기준 절대 경로 자동 설정 (경로 에러 방지)
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    default_hef_path = os.path.join(current_dir, "best_hailo_model", "best.hef")
+    default_labels_path = os.path.join(current_dir, "labels.json")
+    
     parser = argparse.ArgumentParser()
-    parser.add_argument("--hef-path", default="best_hailo_model/best.hef", help="컴파일된 HEF 모델 경로")
+    parser.add_argument("--hef-path", default=default_hef_path, help="컴파일된 HEF 모델 경로")
     parser.add_argument("--input", default="rpi", help="입력 소스 (rpi 카메라 모듈)")
-    parser.add_argument("--labels-json", default="labels.json", help="클래스 이름이 정의된 json 파일 경로")
+    parser.add_argument("--labels-json", default=default_labels_path, help="클래스 이름이 정의된 json 파일 경로")
     # hailo_apps_infra 내부에서 요구하는 기본 인자들을 파싱할 수 있게 넘깁니다.
     args = parser.parse_args()
     
