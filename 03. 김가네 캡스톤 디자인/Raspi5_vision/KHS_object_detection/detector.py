@@ -7,7 +7,7 @@ import hailo
 # 복사해 온 hailo_apps_infra 모듈에서 뼈대 클래스 임포트
 from hailo_apps.python.pipeline_apps.detection.detection_pipeline import GStreamerDetectionApp
 
-# 기존에 작성하신 Detection 클래스 (합의된 포맷 유지)
+# 기존에 작성하신 Detection 클래스
 class Detection:
     def __init__(self, label: str, box: tuple, score: float):
         self.label = label
@@ -75,7 +75,7 @@ class UserData:
 if __name__ == "__main__":
     import argparse
     
-    # 현재 스크립트 위치 기준 절대 경로 자동 설정 (경로 에러 방지)
+    # 현재 스크립트 위치 기준 절대 경로 자동 설정
     current_dir = os.path.dirname(os.path.abspath(__file__))
     default_hef_path = os.path.join(current_dir, "best_hailo_model", "best.hef")
     default_labels_path = os.path.join(current_dir, "labels.json")
@@ -84,14 +84,14 @@ if __name__ == "__main__":
     parser.add_argument("--hef-path", default=default_hef_path, help="컴파일된 HEF 모델 경로")
     parser.add_argument("--input", default="rpi", help="입력 소스 (rpi 카메라 모듈)")
     parser.add_argument("--labels-json", default=default_labels_path, help="클래스 이름이 정의된 json 파일 경로")
-    # hailo_apps_infra 내부에서 요구하는 기본 인자들을 파싱할 수 있게 넘깁니다.
+    
+    # YOLOv8n 네트워크 명시
+    parser.add_argument("--network", default="yolov8n", help="사용할 네트워크 종류")
+    
     args = parser.parse_args()
     
     print("[KHS_Detector] NPU 추론 엔진 가동 시작... (종료하려면 Ctrl+C)")
     
-    # 사용자 데이터 인스턴스 생성 및 전달
     user_data = UserData()
-    
-    # 앱 실행
     app = KHS_DetectorApp(args, user_data=user_data)
-    app.run() # 무한 루프를 돌며 백그라운드에서 카메라와 NPU가 동작합니다.
+    app.run()
