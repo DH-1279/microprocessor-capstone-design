@@ -13,41 +13,46 @@ from haptic_mvp.vision import HailoDetector, CameraSource
 from haptic_mvp.models import Detection
 
 # ==========================================
-# [긴급 패치] 팀원의 엄격한 score 검사 우회 (Monkey Patch)
+# [긴급 패치] 신뢰도 및 박스 좌표 오차 우회 (Monkey Patch)
 # ==========================================
 def patched_decode_hailo_nms(raw, labels, geometry, threshold=0.5, max_objects=20):
-    """부동소수점 오차(예: 1.000001)로 인한 프로그램 강제 종료를 방지하는 패치 함수"""
     found = []
     for label, rows in zip(labels, raw):
         for row in rows:
             if len(row) != 5:
                 continue
             
+            # 1. 신뢰도(Score) 클리핑
             score = float(row[4])
-            
-            # 무한대/NaN 값 버림
             if not math.isfinite(score):
                 continue
-                
-            # NPU 연산 오차 무시: 값을 강제로 0.0 ~ 1.0 사이로 자름(Clipping)
             score = max(0.0, min(1.0, score)) 
-            
             if score < threshold:
                 continue
             
-            box = haptic_mvp.vision.restore_box(row[:4], geometry)
+            # 2. 박스 좌표(ymin, xmin, ymax, xmax) 클리핑 추가
+            ymin = max(0.0, min(1.0, float(row[0])))
+            xmin = max(0.0, min(1.0, float(row[1])))
+            ymax = max(0.0, min(1.0, float(row[2])))
+            xmax = max(0.0, min(1.0, float(row[3])))
+            
+            # 좌표가 비정상적으로 뒤집힌 경우(min이 max보다 큰 경우) 무시
+            if xmin >= xmax or ymin >= ymax:
+                continue
+
+            # 보정된 좌표로 restore_box 호출
+            box = haptic_mvp.vision.restore_box((ymin, xmin, ymax, xmax), geometry)
             if box is not None:
                 found.append(Detection(label=label, box=box, score=score))
                 
     return tuple(sorted(found, key=lambda item: item.score, reverse=True)[:max_objects])
 
-# 팀원의 원본 파싱 함수를 우리가 수정한 안전한 함수로 바꿔치기합니다.
 haptic_mvp.vision.decode_hailo_nms = patched_decode_hailo_nms
 # ==========================================
 
 # 2. 파일 경로 설정
 BASE_DIR = Path(__file__).resolve().parent
-HEF_PATH = str(BASE_DIR / "models" / "best.hef")
+HEF_PATH = str(BASE_DIR / "models" / "yolov8n_custom.hef")
 LABELS_PATH = str(BASE_DIR / "config" / "labels.txt")
 
 def main():
@@ -81,16 +86,13 @@ def main():
                     
                 frame, timestamp = read_result
 
-                # 추론 실행
                 detections = detector.detect(frame)
 
-                # 탐지 결과가 있을 때 터미널에 텍스트 출력
                 if detections:
                     print(f"--- [프레임 {frame_count}] 탐지된 물체 ---")
                     for det in detections:
                         print(f" 🎯 {det.label} (정확도: {det.score:.2f})")
                 
-                # VS Code에서 영상 창 오류를 우회하기 위해 이미지 파일로 덮어쓰기 저장
                 if frame_count % 10 == 0 and detections:
                     display_frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
                     height, width = display_frame.shape[:2]
