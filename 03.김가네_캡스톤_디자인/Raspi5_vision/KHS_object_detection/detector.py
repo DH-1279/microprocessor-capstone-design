@@ -47,7 +47,7 @@ haptic_mvp.vision.decode_hailo_nms = patched_decode_hailo_nms
 
 # 2. 파일 경로 설정
 BASE_DIR = Path(__file__).resolve().parent
-HEF_PATH = str(BASE_DIR / "models" / "best.hef")
+HEF_PATH = str(BASE_DIR / "models" / "yolov8n_custom.hef")
 LABELS_PATH = str(BASE_DIR / "config" / "labels.txt")
 
 def main():
@@ -58,7 +58,7 @@ def main():
         "max_objects": 20,
         "infer_timeout_ms": 1500,
         
-        # 16:9 해상도로 설정하여 화면이 잘리는(줌) 현상 방지
+        # 16:9 해상도로 설정하여 화면 잘림(줌) 방지
         "source": "picamera2", 
         "width": 1280,
         "height": 720,
@@ -71,6 +71,11 @@ def main():
     try:
         with CameraSource(config) as cam, HailoDetector(config) as detector:
             print("추론 시작 - 비디오 창이 선택된 상태에서 'q'를 누르면 종료됩니다.")
+            
+            # --- 창 미리 생성 및 위치 고정 ---
+            window_name = "Raspberry Pi 5 + Hailo-10H"
+            cv2.namedWindow(window_name)
+            cv2.moveWindow(window_name, 50, 50)  # 화면 좌측 상단 (X: 50, Y: 50) 위치로 고정
             
             frame_count = 0
             while True:
@@ -92,7 +97,7 @@ def main():
                         # 1. 정규화 좌표 (0.0 ~ 1.0)
                         x1, y1, x2, y2 = det.box
                         
-                        # 중심점 비율 좌표 계산 (화면상 상대적 위치)
+                        # 중심점 비율 좌표 계산
                         norm_center_x = (x1 + x2) / 2
                         norm_center_y = (y1 + y2) / 2
                         
@@ -102,18 +107,19 @@ def main():
                         center_x = int(norm_center_x * width)
                         center_y = int(norm_center_y * height)
 
-                        # 터미널에 라벨, 정확도 및 좌표 출력
+                        # 터미널 출력
                         print(f" 🎯 {det.label} (정확도: {det.score:.2f}) | 픽셀 중심: ({center_x}, {center_y}) | 비율 중심: X={norm_center_x:.2f}, Y={norm_center_y:.2f}")
 
-                        # 바운딩 박스 그리기 (초록색)
+                        # 바운딩 박스 그리기
                         cv2.rectangle(display_frame, pt1, pt2, (0, 255, 0), 2)
                         cv2.putText(display_frame, f"{det.label}: {det.score:.2f}", (pt1[0], max(pt1[1] - 8, 15)), 
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
                         
-                        # 중심점 그리기 (빨간색 점, 반지름 5)
+                        # 중심점 그리기 (빨간색 점)
                         cv2.circle(display_frame, (center_x, center_y), 5, (0, 0, 255), -1)
                 
-                cv2.imshow("Raspberry Pi 5 + Hailo-10H", display_frame)
+                # 위치가 고정된 창에 화면 출력
+                cv2.imshow(window_name, display_frame)
 
                 frame_count += 1
                 
