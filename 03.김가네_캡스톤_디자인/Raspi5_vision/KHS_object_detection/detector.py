@@ -58,9 +58,10 @@ def main():
         "max_objects": 20,
         "infer_timeout_ms": 1500,
         
+        # 16:9 해상도로 설정하여 화면이 잘리는(줌) 현상 방지
         "source": "picamera2", 
-        "width": 640,
-        "height": 480,
+        "width": 1280,
+        "height": 720,
         "fps": 15,
         "device": 0
     }
@@ -82,23 +83,35 @@ def main():
                 frame, timestamp = read_result
                 detections = detector.detect(frame)
 
-                # 터미널 출력
-                if detections:
-                    print(f"--- [프레임 {frame_count}] 탐지된 물체 ---")
-                    for det in detections:
-                        print(f" 🎯 {det.label} (정확도: {det.score:.2f})")
-                
-                # 실시간 비디오 창 출력
                 display_frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
                 height, width = display_frame.shape[:2]
                 
-                for det in detections:
-                    x1, y1, x2, y2 = det.box
-                    pt1 = (int(x1 * width), int(y1 * height))
-                    pt2 = (int(x2 * width), int(y2 * height))
-                    cv2.rectangle(display_frame, pt1, pt2, (0, 255, 0), 2)
-                    cv2.putText(display_frame, f"{det.label}: {det.score:.2f}", (pt1[0], max(pt1[1] - 8, 15)), 
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+                if detections:
+                    print(f"--- [프레임 {frame_count}] 탐지된 물체 ---")
+                    for det in detections:
+                        # 1. 정규화 좌표 (0.0 ~ 1.0)
+                        x1, y1, x2, y2 = det.box
+                        
+                        # 중심점 비율 좌표 계산 (화면상 상대적 위치)
+                        norm_center_x = (x1 + x2) / 2
+                        norm_center_y = (y1 + y2) / 2
+                        
+                        # 2. 화면 출력용 픽셀 좌표 변환
+                        pt1 = (int(x1 * width), int(y1 * height))
+                        pt2 = (int(x2 * width), int(y2 * height))
+                        center_x = int(norm_center_x * width)
+                        center_y = int(norm_center_y * height)
+
+                        # 터미널에 라벨, 정확도 및 좌표 출력
+                        print(f" 🎯 {det.label} (정확도: {det.score:.2f}) | 픽셀 중심: ({center_x}, {center_y}) | 비율 중심: X={norm_center_x:.2f}, Y={norm_center_y:.2f}")
+
+                        # 바운딩 박스 그리기 (초록색)
+                        cv2.rectangle(display_frame, pt1, pt2, (0, 255, 0), 2)
+                        cv2.putText(display_frame, f"{det.label}: {det.score:.2f}", (pt1[0], max(pt1[1] - 8, 15)), 
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+                        
+                        # 중심점 그리기 (빨간색 점, 반지름 5)
+                        cv2.circle(display_frame, (center_x, center_y), 5, (0, 0, 255), -1)
                 
                 cv2.imshow("Raspberry Pi 5 + Hailo-10H", display_frame)
 
