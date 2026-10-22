@@ -15,7 +15,7 @@ from haptic_mvp.models import Detection
 from hand_tracker import HandTracker, draw_hand
 
 # ==========================================
-# [긴급 패치] 신뢰도 및 박스 좌표 오차 우회 (Monkey Patch)
+# [긴급 패치] 신뢰도 및 박스 좌표 오차 우회 (Monkey Patch)[cite: 1]
 # ==========================================
 def patched_decode_hailo_nms(raw, labels, geometry, threshold=0.5, max_objects=20):
     found = []
@@ -48,30 +48,26 @@ def patched_decode_hailo_nms(raw, labels, geometry, threshold=0.5, max_objects=2
 haptic_mvp.vision.decode_hailo_nms = patched_decode_hailo_nms
 # ==========================================
 
-# 2. 파일 경로 설정
+# 2. 파일 경로 설정[cite: 1]
 BASE_DIR = Path(__file__).resolve().parent
 HEF_PATH = str(BASE_DIR / "models" / "best.hef")
 LABELS_PATH = str(BASE_DIR / "config" / "labels.txt")
-# PROJECT_ROOT를 기준으로 손 추적 모델 절대 경로 설정
 HAND_MODEL_PATH = str(Path(PROJECT_ROOT) / "models" / "hand_landmarker.task")
 
 def main():
-    # 3. 통합 Config 설정
+    # 3. 통합 Config 설정[cite: 1, 2]
     config = {
-        # Hailo 객체 인식 설정[cite: 1]
         "object_model": HEF_PATH,
         "labels_file": LABELS_PATH,
         "score_threshold": 0.5,
         "max_objects": 20,
         "infer_timeout_ms": 1500,
         
-        # MediaPipe 손 추적 설정[cite: 2]
         "hand_model": HAND_MODEL_PATH,
         "hand": "Right",
         "worn_hand": "Right",
         "hand_score_threshold": 0.6,
         
-        # 카메라 설정[cite: 1]
         "source": "picamera2", 
         "width": 1280,
         "height": 720,
@@ -114,35 +110,46 @@ def main():
                 if obj_detections or hand_result is not None:
                     print(f"\n--- [프레임 {frame_count}] 탐지 결과 ---")
 
+                # 손가락 끝 인덱스 및 이름 정의[cite: 2]
+                landmarks = getattr(tracker, "last_landmarks", None)
+                fingertip_indices = (4, 8, 12, 16, 20)
+                tip_names = ("엄지", "검지", "중지", "약지", "새끼")
+
                 if obj_detections:
                     for det in obj_detections:
+                        # 객체 중심점 픽셀 좌표 계산[cite: 1]
                         x1, y1, x2, y2 = det.box
                         norm_center_x = (x1 + x2) / 2
                         norm_center_y = (y1 + y2) / 2
-                        
-                        pt1 = (int(x1 * width), int(y1 * height))
-                        pt2 = (int(x2 * width), int(y2 * height))
                         center_x = int(norm_center_x * width)
                         center_y = int(norm_center_y * height)
+                        pt1 = (int(x1 * width), int(y1 * height))
+                        pt2 = (int(x2 * width), int(y2 * height))
 
-                        # 터미널에 객체 정보 출력[cite: 1]
-                        print(f" 🎯 객체: {det.label} (정확도: {det.score:.2f}) | 픽셀: ({center_x}, {center_y}) | 비율: X={norm_center_x:.2f}, Y={norm_center_y:.2f}")
+                        print(f" 🎯 객체: {det.label} | 중심 픽셀: ({center_x}, {center_y})")
 
-                        # 화면에 바운딩 박스 및 중심점 그리기[cite: 1]
+                        # 손 랜드마크가 있을 경우 좌표 및 거리 출력[cite: 2]
+                        if landmarks is not None:
+                            dist_strs = []
+                            for idx, name in zip(fingertip_indices, tip_names):
+                                tip_x = int(landmarks[idx].x * width)
+                                tip_y = int(landmarks[idx].y * height)
+                                
+                                # 두 점 사이의 유클리디안 거리 계산
+                                dist = math.hypot(center_x - tip_x, center_y - tip_y)
+                                dist_strs.append(f"{name}({tip_x},{tip_y}): {dist:.1f}px")
+                                
+                            print(f"    └ 📏 손가락 위치 및 거리: " + " / ".join(dist_strs))
+
+                        # 화면 시각화[cite: 1]
                         cv2.rectangle(display_frame, pt1, pt2, (0, 255, 0), 2)
                         cv2.putText(display_frame, f"{det.label}: {det.score:.2f}", (pt1[0], max(pt1[1] - 8, 15)), 
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
                         cv2.circle(display_frame, (center_x, center_y), 5, (0, 0, 255), -1)
                 
                 if hand_result is not None:
-                    hx, hy = hand_result.point
-                    h_center_x, h_center_y = int(hx * width), int(hy * height)
-                    
-                    # 터미널에 손 정보 출력[cite: 2]
-                    print(f" 🖐️ 손: {hand_result.handedness} (정확도: {hand_result.score:.2f}) | 픽셀: ({h_center_x}, {h_center_y}) | 비율: X={hx:.2f}, Y={hy:.2f}")
-
-                # 화면에 손 랜드마크 그리기[cite: 2]
-                draw_hand(cv2, display_frame, tracker, hand_result)
+                    # 화면에 손 랜드마크 그리기[cite: 2]
+                    draw_hand(cv2, display_frame, tracker, hand_result)
                 
                 cv2.imshow(window_name, display_frame)
                 frame_count += 1
