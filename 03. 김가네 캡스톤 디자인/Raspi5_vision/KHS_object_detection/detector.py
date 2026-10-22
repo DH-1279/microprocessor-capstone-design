@@ -1,146 +1,138 @@
+import sys
+import cv2
+import math
+from pathlib import Path
 
-import os
-import gi
+# 1. 모듈 임포트를 위한 최상위 경로 추가
+PROJECT_ROOT = "/home/dh1279/Desktop/kimGA_raspi/microprocessor-capstone-design/03.김가네_캡스톤_디자인/Raspi5_vision"
+sys.path.append(PROJECT_ROOT)
 
-gi.require_version("Gst", "1.0")
-from gi.repository import Gst
-import hailo
+import haptic_mvp.vision
+from haptic_mvp.vision import HailoDetector, CameraSource
+from haptic_mvp.models import Detection
 
-from hailo_apps.python.pipeline_apps.detection.detection_pipeline import (
-    GStreamerDetectionApp,
-    get_pipeline_parser,
-)
+# ==========================================
+# [긴급 패치] 신뢰도 및 박스 좌표 오차 우회 (Monkey Patch)
+# ==========================================
+def patched_decode_hailo_nms(raw, labels, geometry, threshold=0.5, max_objects=20):
+    found = []
+    for label, rows in zip(labels, raw):
+        for row in rows:
+            if len(row) != 5:
+                continue
+            
+            score = float(row[4])
+            if not math.isfinite(score):
+                continue
+            score = max(0.0, min(1.0, score)) 
+            if score < threshold:
+                continue
+            
+            ymin = max(0.0, min(1.0, float(row[0])))
+            xmin = max(0.0, min(1.0, float(row[1])))
+            ymax = max(0.0, min(1.0, float(row[2])))
+            xmax = max(0.0, min(1.0, float(row[3])))
+            
+            if xmin >= xmax or ymin >= ymax:
+                continue
 
+            box = haptic_mvp.vision.restore_box((ymin, xmin, ymax, xmax), geometry)
+            if box is not None:
+                found.append(Detection(label=label, box=box, score=score))
+                
+    return tuple(sorted(found, key=lambda item: item.score, reverse=True)[:max_objects])
 
-# ---------------------------------------------------------
-# 탐지 결과를 저장하는 클래스
-# ---------------------------------------------------------
-class Detection:
-    def __init__(self, label: str, box: tuple, score: float):
-        self.label = label
-        self.box = box  # (x1, y1, x2, y2), 0~1 정규화 좌표
-        self.score = score
+haptic_mvp.vision.decode_hailo_nms = patched_decode_hailo_nms
+# ==========================================
 
-    def __repr__(self):
-        return (
-            f"Detection(label='{self.label}', "
-            f"box={self.box}, score={self.score:.2f})"
-        )
+# 2. 파일 경로 설정
+BASE_DIR = Path(__file__).resolve().parent
+HEF_PATH = str(BASE_DIR / "models" / "yolov8n_custom.hef")
+LABELS_PATH = str(BASE_DIR / "config" / "labels.txt")
 
+def main():
+    config = {
+        "object_model": HEF_PATH,
+        "labels_file": LABELS_PATH,
+        "score_threshold": 0.5,
+        "max_objects": 20,
+        "infer_timeout_ms": 1500,
+        
+        # 16:9 해상도로 설정하여 화면 잘림(줌) 방지
+        "source": "picamera2", 
+        "width": 1280,
+        "height": 720,
+        "fps": 15,
+        "device": 0
+    }
 
-# ---------------------------------------------------------
-# Hailo NPU 객체 탐지 콜백
-# ---------------------------------------------------------
-def app_callback(pad, info, user_data):
-    buffer = info.get_buffer()
+    print("초기화 중... (카메라 웜업)")
 
-    if buffer is None:
-        return Gst.PadProbeReturn.OK
+    try:
+        with CameraSource(config) as cam, HailoDetector(config) as detector:
+            print("추론 시작 - 비디오 창이 선택된 상태에서 'q'를 누르면 종료됩니다.")
+            
+            # --- 창 미리 생성 및 위치 고정 ---
+            window_name = "Raspberry Pi 5 + Hailo-10H"
+            cv2.namedWindow(window_name)
+            cv2.moveWindow(window_name, 50, 50)  # 화면 좌측 상단 (X: 50, Y: 50) 위치로 고정
+            
+            frame_count = 0
+            while True:
+                read_result = cam.read()
+                
+                if read_result is None:
+                    print("프레임을 읽어올 수 없습니다.")
+                    break
+                    
+                frame, timestamp = read_result
+                detections = detector.detect(frame)
 
-    # Hailo 메타데이터에서 탐지 결과 가져오기
-    roi = hailo.get_main_roi(buffer)
-    hailo_detections = roi.get_objects_typed(hailo.HAILO_DETECTION)
+                display_frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+                height, width = display_frame.shape[:2]
+                
+                if detections:
+                    print(f"--- [프레임 {frame_count}] 탐지된 물체 ---")
+                    for det in detections:
+                        # 1. 정규화 좌표 (0.0 ~ 1.0)
+                        x1, y1, x2, y2 = det.box
+                        
+                        # 중심점 비율 좌표 계산
+                        norm_center_x = (x1 + x2) / 2
+                        norm_center_y = (y1 + y2) / 2
+                        
+                        # 2. 화면 출력용 픽셀 좌표 변환
+                        pt1 = (int(x1 * width), int(y1 * height))
+                        pt2 = (int(x2 * width), int(y2 * height))
+                        center_x = int(norm_center_x * width)
+                        center_y = int(norm_center_y * height)
 
-    detected_objects = []
+                        # 터미널 출력
+                        print(f" 🎯 {det.label} (정확도: {det.score:.2f}) | 픽셀 중심: ({center_x}, {center_y}) | 비율 중심: X={norm_center_x:.2f}, Y={norm_center_y:.2f}")
 
-    for det in hailo_detections:
-        confidence = det.get_confidence()
+                        # 바운딩 박스 그리기
+                        cv2.rectangle(display_frame, pt1, pt2, (0, 255, 0), 2)
+                        cv2.putText(display_frame, f"{det.label}: {det.score:.2f}", (pt1[0], max(pt1[1] - 8, 15)), 
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+                        
+                        # 중심점 그리기 (빨간색 점)
+                        cv2.circle(display_frame, (center_x, center_y), 5, (0, 0, 255), -1)
+                
+                # 위치가 고정된 창에 화면 출력
+                cv2.imshow(window_name, display_frame)
 
-        # 신뢰도 50% 미만 제외
-        if confidence < 0.5:
-            continue
+                frame_count += 1
+                
+                # 키보드 입력 대기 및 종료 처리 ('q' 누름)
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    break
 
-        label = det.get_label()
-        bbox = det.get_bbox()
+    except KeyboardInterrupt:
+        print("\n프로그램을 안전하게 종료합니다.")
+    except Exception as e:
+        print(f"실행 중 에러가 발생했습니다: {e}")
+    finally:
+        cv2.destroyAllWindows()
 
-        det_obj = Detection(
-            label=label,
-            box=(
-                bbox.xmin(),
-                bbox.ymin(),
-                bbox.xmax(),
-                bbox.ymax(),
-            ),
-            score=confidence,
-        )
-
-        detected_objects.append(det_obj)
-
-    # 탐지 결과 출력
-    if detected_objects:
-        print(f"[KHS_Detector] 탐지 결과: {detected_objects}")
-
-    # TODO: 추후 haptic_mvp 모듈과 연결하여 진동 모터 제어
-
-    return Gst.PadProbeReturn.OK
-
-
-# ---------------------------------------------------------
-# 사용자 데이터
-# ---------------------------------------------------------
-class UserData:
-    def __init__(self):
-        self.use_frame = False
-
-
-# ---------------------------------------------------------
-# 메인 실행
-# ---------------------------------------------------------
 if __name__ == "__main__":
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-
-    # 사용자 HEF 및 라벨 파일의 절대 경로
-    default_hef_path = os.path.join(
-        current_dir,
-        "best_hailo_model",
-        "best.hef",
-    )
-
-    default_labels_path = os.path.join(
-        current_dir,
-        "labels.json",
-    )
-
-    print("[KHS_Detector] 파일 경로 확인 중...")
-
-    # HEF 파일 확인
-    if not os.path.isfile(default_hef_path):
-        raise FileNotFoundError(
-            f"HEF 파일을 찾을 수 없습니다:\n{default_hef_path}"
-        )
-
-    # 라벨 파일 확인
-    if not os.path.isfile(default_labels_path):
-        raise FileNotFoundError(
-            f"라벨 파일을 찾을 수 없습니다:\n{default_labels_path}"
-        )
-
-    print(f"[KHS_Detector] HEF: {default_hef_path}")
-    print(f"[KHS_Detector] Labels: {default_labels_path}")
-
-    # Hailo 앱에서 제공하는 기본 파서 사용
-    parser = get_pipeline_parser()
-
-    # 기본 모델 대신 사용자 모델 경로 지정
-    parser.set_defaults(
-        hef_path=default_hef_path,
-        labels_json=default_labels_path,
-    )
-
-    # 명령행 인자 파싱
-    args = parser.parse_args()
-
-    print("[KHS_Detector] NPU 추론 엔진 가동 시작...")
-    print("[KHS_Detector] 종료하려면 Ctrl+C를 누르세요.")
-
-    user_data = UserData()
-
-    # 확인된 생성자 인터페이스:
-    # GStreamerDetectionApp(app_callback, user_data, parser=None)
-    app = GStreamerDetectionApp(
-        app_callback,
-        user_data,
-        parser=parser,
-    )
-
-    app.run()
+    main()
