@@ -46,6 +46,18 @@ from typing import Any
 POINT_LANDMARKS = (0, 5, 9, 13, 17)
 LANDMARK_COUNT = 21
 
+# Fingertips, in thumb-to-little order. Already produced by MediaPipe.
+FINGERTIP_LANDMARKS = (4, 8, 12, 16, 20)
+
+# Three palm joints used to tell the back of the hand from the palm.
+# Fingers bend; these barely move.
+WRIST, INDEX_BASE, PINKY_BASE = 0, 5, 17
+
+# Below this the three points are nearly collinear and the sign is unreliable.
+# Measured 2026-10-23: the magnitude stayed near 0.020 for a gloved left hand,
+# five times this, and no frame was ever rejected for being too small.
+FACING_MIN_AREA = 0.004
+
 DEFAULTS = {
     "vote_frames": 5,         # frames kept for the handedness vote
     "vote_margin": 2,         # how far ahead the winner must be to switch
@@ -74,7 +86,49 @@ def stability_config(values: dict | None = None) -> dict:
     return config
 
 
-def hand_candidates(result: Any, threshold: float) -> tuple:
+def palm_cross(landmarks) -> float:
+    """Signed area of wrist, index base and pinky base, in image coordinates.
+
+    Turning the hand over reverses the order the three points are drawn in, so
+    the sign flips. Only the sign and the magnitude matter here.
+    """
+    wrist = landmarks[WRIST]
+    index = landmarks[INDEX_BASE]
+    pinky = landmarks[PINKY_BASE]
+    return ((index.x - wrist.x) * (pinky.y - wrist.y)
+            - (index.y - wrist.y) * (pinky.x - wrist.x))
+
+
+def palm_facing_up(landmarks, worn_hand: str) -> bool | None:
+    """
+    True when the back of the hand faces the camera, None when unclear.
+
+    The sign means opposite things for a left and a right hand, so the hand
+    has to be known. MediaPipe's own handedness is not used: measured on
+    2026-10-23, it disagreed with the worn hand in 67.6% of frames while the
+    back of a gloved left hand faced the camera. Which hand wears the glove is
+    a setting, so it is read from the configuration instead.
+
+    With that change the same measurement gave 469/469 and 424/424 correct for
+    the back and the palm of a gloved left hand.
+    """
+    cross = palm_cross(landmarks)
+    if abs(cross) < FACING_MIN_AREA:
+        return None
+    facing_up = cross > 0
+    if worn_hand == "Left":
+        facing_up = not facing_up
+    return facing_up
+
+
+def fingertip_points(landmarks) -> tuple:
+    """The five fingertips, thumb first, in the same 0-1 frame as point."""
+    return tuple((float(landmarks[i].x), float(landmarks[i].y))
+                 for i in FINGERTIP_LANDMARKS)
+
+
+def hand_candidates(result: Any, threshold: float,
+                    worn_hand: str = "Right") -> tuple:
     """Every usable hand in one frame, without choosing between them.
 
     Handedness is reported, not filtered. detect() needs the reading even when
@@ -102,18 +156,37 @@ def hand_candidates(result: Any, threshold: float) -> tuple:
             continue
         point = (sum(p[0] for p in points) / len(points),
                  sum(p[1] for p in points) / len(points))
-        found.append(Hand(point=point, score=score, handedness=handedness))
+        found.append(_build_hand(Hand, point, score, handedness,
+                                 landmarks, worn_hand))
     return tuple(found)
 
 
-def hand_from_result(result: Any, selected: str, threshold: float):
+def _build_hand(Hand, point, score, handedness, landmarks, worn_hand):
+    """
+    Fill whatever fields models.Hand has.
+
+    palm_up and fingertips are only passed when the shared type declares them,
+    so this keeps working before that change lands and picks them up after.
+    """
+    extra = {}
+    fields = getattr(Hand, "__dataclass_fields__", {})
+    if "palm_up" in fields:
+        extra["palm_up"] = palm_facing_up(landmarks, worn_hand)
+    if "fingertips" in fields:
+        extra["fingertips"] = fingertip_points(landmarks)
+    return Hand(point=point, score=score, handedness=handedness, **extra)
+
+
+def hand_from_result(result: Any, selected: str, threshold: float,
+                     worn_hand: str = "Right"):
     """Reject ambiguous hands; handedness score is not landmark confidence."""
-    matching = [hand for hand in hand_candidates(result, threshold)
+    matching = [hand for hand in hand_candidates(result, threshold, worn_hand)
                 if selected == "Any" or hand.handedness == selected]
     return matching[0] if len(matching) == 1 else None
 
 
-def select_for_vote(result: Any, selected: str, threshold: float):
+def select_for_vote(result: Any, selected: str, threshold: float,
+                    worn_hand: str = "Right"):
     """
     The reading to hand to the stabilizer.
 
@@ -122,10 +195,10 @@ def select_for_vote(result: Any, selected: str, threshold: float):
     With several hands the existing policy decides, so a second hand in frame
     still stops guidance rather than being voted into the target.
     """
-    candidates = hand_candidates(result, threshold)
+    candidates = hand_candidates(result, threshold, worn_hand)
     if len(candidates) == 1:
         return candidates[0]
-    return hand_from_result(result, selected, threshold)
+    return hand_from_result(result, selected, threshold, worn_hand)
 
 
 @dataclass(frozen=True)
@@ -245,6 +318,11 @@ class HandTracker:
                 f"Local .task model is missing: {model}; see VISION_SETUP.md")
         self.model_path = str(model.resolve())
         self.selected = config.get("hand", "Right")
+        # Which hand wears the glove. Used for the back/palm decision instead
+        # of MediaPipe's handedness, which is unreliable through a glove.
+        self.worn_hand = config.get("worn_hand", self.selected)
+        if self.worn_hand not in {"Left", "Right"}:
+            self.worn_hand = "Right"
         self.threshold = float(config.get("hand_score_threshold", 0.6))
         self.stabilizer = HandStabilizer(
             stability if stability is not None else config.get("hand_stability"),
@@ -289,7 +367,8 @@ class HandTracker:
         self.last_timestamp = timestamp
         image = self.mp.Image(image_format=self.mp.ImageFormat.SRGB, data=rgb)
         result = self.tracker.detect_for_video(image, timestamp)
-        raw = select_for_vote(result, self.selected, self.threshold)
+        raw = select_for_vote(result, self.selected, self.threshold,
+                              self.worn_hand)
         self.last_result = self.stabilizer.update(raw, captured_at)
         return self.last_result
 
