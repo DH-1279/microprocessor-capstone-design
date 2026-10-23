@@ -1,0 +1,11 @@
+Earbud
+bottle
+cell phone
+cup
+remote
+Glasses
+Medicine
+key
+Pen
+Tumbler
+Wallet

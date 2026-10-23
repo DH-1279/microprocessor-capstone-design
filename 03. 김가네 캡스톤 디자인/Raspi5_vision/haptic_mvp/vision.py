@@ -6,6 +6,7 @@ accepts RGB HEFs with one NMS-by-class output, not arbitrary YOLO tensors.
 
 from __future__ import annotations
 
+from KHS_KMJ_vision.hand_tracker import HandTracker, draw_hand
 from contextlib import ExitStack
 from dataclasses import dataclass
 import math
@@ -447,7 +448,7 @@ def run_vision(config: dict, emit: Callable[[Observation], None], stop: threadin
     detector_type = HailoDetector if detector_name == "hailo" else UltralyticsDetector
     with ExitStack() as resources:
         detector = resources.enter_context(detector_type(config))
-        tracker = resources.enter_context(MediaPipeHandTracker(config))
+        tracker = resources.enter_context(HandTracker(config))
         source = resources.enter_context(CameraSource(config))
         frames = resources.enter_context(LatestFrames(source))
         if config.get("show_preview", False):
