@@ -55,7 +55,7 @@ LABELS_PATH = str(BASE_DIR / "config" / "labels.txt")
 HAND_MODEL_PATH = str(Path(PROJECT_ROOT) / "models" / "hand_landmarker.task")
 
 def main():
-    # 3. 통합 Config 설정[cite: 1, 2]
+    # 3. 통합 Config 설정 (왼손으로 변경)[cite: 1, 2]
     config = {
         "object_model": HEF_PATH,
         "labels_file": LABELS_PATH,
@@ -64,8 +64,8 @@ def main():
         "infer_timeout_ms": 1500,
         
         "hand_model": HAND_MODEL_PATH,
-        "hand": "Right",
-        "worn_hand": "Right",
+        "hand": "Any",            # 오른손에서 왼손으로 변경[cite: 2]
+        "worn_hand": "Any",       # 글러브 착용 손도 왼손으로 일치[cite: 2]
         "hand_score_threshold": 0.6,
         
         "source": "picamera2", 
@@ -110,14 +110,13 @@ def main():
                 if obj_detections or hand_result is not None:
                     print(f"\n--- [프레임 {frame_count}] 탐지 결과 ---")
 
-                # 손가락 끝 인덱스 및 이름 정의[cite: 2]
                 landmarks = getattr(tracker, "last_landmarks", None)
                 fingertip_indices = (4, 8, 12, 16, 20)
                 tip_names = ("엄지", "검지", "중지", "약지", "새끼")
 
+                # 객체 정보 출력 및 거리 계산
                 if obj_detections:
                     for det in obj_detections:
-                        # 객체 중심점 픽셀 좌표 계산[cite: 1]
                         x1, y1, x2, y2 = det.box
                         norm_center_x = (x1 + x2) / 2
                         norm_center_y = (y1 + y2) / 2
@@ -128,18 +127,15 @@ def main():
 
                         print(f" 🎯 객체: {det.label} | 중심 픽셀: ({center_x}, {center_y})")
 
-                        # 손 랜드마크가 있을 경우 좌표 및 거리 출력[cite: 2]
+                        # 객체와 손이 모두 있을 때 거리 출력[cite: 2]
                         if landmarks is not None:
                             dist_strs = []
                             for idx, name in zip(fingertip_indices, tip_names):
                                 tip_x = int(landmarks[idx].x * width)
                                 tip_y = int(landmarks[idx].y * height)
-                                
-                                # 두 점 사이의 유클리디안 거리 계산
                                 dist = math.hypot(center_x - tip_x, center_y - tip_y)
-                                dist_strs.append(f"{name}({tip_x},{tip_y}): {dist:.1f}px")
-                                
-                            print(f"    └ 📏 손가락 위치 및 거리: " + " / ".join(dist_strs))
+                                dist_strs.append(f"{name}: {dist:.1f}px")
+                            print(f"    └ 📏 객체와의 거리: " + " / ".join(dist_strs))
 
                         # 화면 시각화[cite: 1]
                         cv2.rectangle(display_frame, pt1, pt2, (0, 255, 0), 2)
@@ -147,7 +143,20 @@ def main():
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
                         cv2.circle(display_frame, (center_x, center_y), 5, (0, 0, 255), -1)
                 
+                # 손 정보 단독 출력 (객체 유무와 상관없이 출력됨)
                 if hand_result is not None:
+                    hx, hy = hand_result.point
+                    h_center_x, h_center_y = int(hx * width), int(hy * height)
+                    print(f" 🖐️ 손: {hand_result.handedness} (정확도: {hand_result.score:.2f}) | 중심 픽셀: ({h_center_x}, {h_center_y})")
+                    
+                    if landmarks is not None:
+                        coord_strs = []
+                        for idx, name in zip(fingertip_indices, tip_names):
+                            tip_x = int(landmarks[idx].x * width)
+                            tip_y = int(landmarks[idx].y * height)
+                            coord_strs.append(f"{name}({tip_x},{tip_y})")
+                        print(f"    └ 📍 손가락 절대 좌표: " + ", ".join(coord_strs))
+
                     # 화면에 손 랜드마크 그리기[cite: 2]
                     draw_hand(cv2, display_frame, tracker, hand_result)
                 
