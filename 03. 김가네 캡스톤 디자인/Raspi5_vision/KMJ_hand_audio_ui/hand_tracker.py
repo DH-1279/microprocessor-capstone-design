@@ -292,6 +292,66 @@ class HandStabilizer:
                      self.flips_absorbed, self.switches)
 
 
+# Landmark pairs that outline a hand, for the optional preview.
+CONNECTIONS = (
+    (0, 1), (1, 2), (2, 3), (3, 4),
+    (0, 5), (5, 6), (6, 7), (7, 8),
+    (5, 9), (9, 10), (10, 11), (11, 12),
+    (9, 13), (13, 14), (14, 15), (15, 16),
+    (13, 17), (17, 18), (18, 19), (19, 20),
+    (0, 17),
+)
+TIP_NAMES = ("TH", "IN", "MI", "RI", "PI")
+
+
+def draw_hand(cv2, frame, tracker, hand) -> None:
+    """
+    Draw what the tracker saw onto a BGR preview frame.
+
+    Kept here rather than in the preview code so the joint indices and the
+    palm triangle stay next to the logic that uses them. cv2 is passed in so
+    this module never imports it.
+
+    Draws nothing when no hand was found, and falls back to the single point
+    when the raw landmarks are unavailable.
+    """
+    height, width = frame.shape[:2]
+    landmarks = getattr(tracker, "last_landmarks", None)
+
+    if landmarks is not None:
+        points = [(int(m.x * width), int(m.y * height)) for m in landmarks]
+        for a, b in CONNECTIONS:
+            cv2.line(frame, points[a], points[b], (0, 200, 0), 2)
+        for x, y in points:
+            cv2.circle(frame, (x, y), 3, (0, 0, 200), -1)
+
+        # The three joints the back/palm decision uses.
+        for index in (WRIST, INDEX_BASE, PINKY_BASE):
+            cv2.circle(frame, points[index], 9, (255, 0, 255), 2)
+        cv2.line(frame, points[WRIST], points[INDEX_BASE], (255, 0, 255), 2)
+        cv2.line(frame, points[WRIST], points[PINKY_BASE], (255, 0, 255), 2)
+
+        for index, name in zip(FINGERTIP_LANDMARKS, TIP_NAMES):
+            x, y = points[index]
+            cv2.circle(frame, (x, y), 7, (0, 180, 255), -1)
+            cv2.putText(frame, name, (x + 9, y - 4),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 180, 255), 1)
+
+    if hand is None:
+        return
+
+    # What the controller actually guides with.
+    x, y = hand.point
+    cv2.circle(frame, (int(x * width), int(y * height)), 12, (255, 255, 0), 3)
+
+    facing = getattr(hand, "palm_up", None)
+    if facing is None and landmarks is not None:
+        facing = palm_facing_up(landmarks, getattr(tracker, "worn_hand", "Right"))
+    label = {True: "back", False: "palm"}.get(facing, "edge?")
+    cv2.putText(frame, f"{hand.handedness}  {label}", (10, 28),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+
+
 class HandTracker:
     """
     MediaPipe Tasks Hand Landmarker on the shared RGB frame.
@@ -330,6 +390,7 @@ class HandTracker:
         self.last_timestamp = -1
         self.last_frame_id: int | None = None
         self.last_result = None
+        self.last_landmarks = None
 
     def __enter__(self):
         import mediapipe as mp
@@ -367,6 +428,10 @@ class HandTracker:
         self.last_timestamp = timestamp
         image = self.mp.Image(image_format=self.mp.ImageFormat.SRGB, data=rgb)
         result = self.tracker.detect_for_video(image, timestamp)
+        # Kept so a measuring tool can draw the skeleton; the guidance path
+        # never reads it.
+        self.last_landmarks = (result.hand_landmarks[0]
+                               if result.hand_landmarks else None)
         raw = select_for_vote(result, self.selected, self.threshold,
                               self.worn_hand)
         self.last_result = self.stabilizer.update(raw, captured_at)
