@@ -6,7 +6,7 @@ accepts RGB HEFs with one NMS-by-class output, not arbitrary YOLO tensors.
 
 from __future__ import annotations
 
-from KMJ_hand_audio_ui.hand_tracker import HandTracker, draw_hand
+from KHS_KMJ_vision.hand_tracker import HandTracker, draw_hand
 from contextlib import ExitStack
 from dataclasses import dataclass
 import math
