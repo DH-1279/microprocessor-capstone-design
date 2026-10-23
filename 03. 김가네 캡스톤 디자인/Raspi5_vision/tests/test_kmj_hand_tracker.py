@@ -234,6 +234,118 @@ class TrackerPathTests(unittest.TestCase):
         self.assertIsNone(select_for_vote(same, "Right", 0.6))
 
 
+def palm_frame(wrist, index, pinky, name="Right"):
+    """A frame whose three palm joints sit where we put them."""
+    landmarks = [SimpleNamespace(x=0.5, y=0.5) for _ in range(21)]
+    landmarks[0] = SimpleNamespace(x=wrist[0], y=wrist[1])
+    landmarks[5] = SimpleNamespace(x=index[0], y=index[1])
+    landmarks[17] = SimpleNamespace(x=pinky[0], y=pinky[1])
+    for index_, value in zip((4, 8, 12, 16, 20), (0.1, 0.2, 0.3, 0.4, 0.5)):
+        landmarks[index_] = SimpleNamespace(x=value, y=value)
+    return SimpleNamespace(
+        hand_landmarks=[landmarks],
+        handedness=[[SimpleNamespace(category_name=name, score=0.9)]])
+
+
+# A left hand, back of the hand toward the camera, has the index base left of
+# the pinky base. Turning it over swaps them.
+LEFT_BACK = ((0.5, 0.8), (0.6, 0.4), (0.4, 0.4))
+LEFT_PALM = ((0.5, 0.8), (0.4, 0.4), (0.6, 0.4))
+
+
+class FacingTests(unittest.TestCase):
+    """Back of the hand against palm, from the camera alone.
+
+    Measured 2026-10-23 with a gloved left hand: 469/469 and 424/424 correct.
+    MediaPipe's own handedness disagreed with the worn hand in 67.6% of the
+    back-of-hand frames, which is why the worn hand is a setting here.
+    """
+
+    def test_turning_the_hand_over_flips_the_answer(self):
+        from KMJ_hand_audio_ui.hand_tracker import palm_facing_up
+
+        self.assertIs(palm_facing_up(palm_frame(*LEFT_BACK).hand_landmarks[0],
+                                     "Left"), True)
+        self.assertIs(palm_facing_up(palm_frame(*LEFT_PALM).hand_landmarks[0],
+                                     "Left"), False)
+
+    def test_the_two_hands_read_the_same_geometry_oppositely(self):
+        from KMJ_hand_audio_ui.hand_tracker import palm_facing_up
+
+        landmarks = palm_frame(*LEFT_BACK).hand_landmarks[0]
+        self.assertIsNot(palm_facing_up(landmarks, "Left"),
+                         palm_facing_up(landmarks, "Right"))
+
+    def test_mediapipe_handedness_does_not_change_the_answer(self):
+        from KMJ_hand_audio_ui.hand_tracker import palm_facing_up
+
+        for reported in ("Left", "Right"):
+            with self.subTest(reported=reported):
+                landmarks = palm_frame(*LEFT_BACK, name=reported).hand_landmarks[0]
+                self.assertIs(palm_facing_up(landmarks, "Left"), True)
+
+    def test_an_edge_on_hand_is_not_guessed(self):
+        from KMJ_hand_audio_ui.hand_tracker import palm_facing_up
+
+        # Wrist, index base and pinky base nearly in a line.
+        edge = palm_frame((0.5, 0.8), (0.5, 0.5), (0.51, 0.4))
+        self.assertIsNone(palm_facing_up(edge.hand_landmarks[0], "Left"))
+
+
+class FingertipTests(unittest.TestCase):
+    def test_five_tips_in_thumb_to_little_order(self):
+        from KMJ_hand_audio_ui.hand_tracker import fingertip_points
+
+        tips = fingertip_points(palm_frame(*LEFT_BACK).hand_landmarks[0])
+        self.assertEqual(tips, ((0.1, 0.1), (0.2, 0.2), (0.3, 0.3),
+                                (0.4, 0.4), (0.5, 0.5)))
+
+
+class SharedTypeTests(unittest.TestCase):
+    """The extra values are only passed when models.Hand declares them."""
+
+    def build(self, hand_type, worn="Left"):
+        from dataclasses import dataclass
+
+        import haptic_mvp.models as models
+        from KMJ_hand_audio_ui.hand_tracker import hand_candidates
+
+        original = models.Hand
+        models.Hand = hand_type
+        try:
+            return hand_candidates(palm_frame(*LEFT_BACK), 0.6, worn)[0]
+        finally:
+            models.Hand = original
+
+    def test_a_hand_without_the_fields_still_works(self):
+        from dataclasses import dataclass
+
+        @dataclass(frozen=True)
+        class Current:
+            point: tuple
+            score: float
+            handedness: str
+
+        hand = self.build(Current)
+        self.assertEqual(hand.score, 0.9)
+        self.assertFalse(hasattr(hand, "palm_up"))
+
+    def test_the_fields_are_filled_once_declared(self):
+        from dataclasses import dataclass
+
+        @dataclass(frozen=True)
+        class Extended:
+            point: tuple
+            score: float
+            handedness: str
+            palm_up: object = None
+            fingertips: tuple = ()
+
+        hand = self.build(Extended)
+        self.assertIs(hand.palm_up, True)
+        self.assertEqual(len(hand.fingertips), 5)
+
+
 class FrameIdTests(unittest.TestCase):
     """A result must belong to one frame, so parallel inference cannot mix."""
 
