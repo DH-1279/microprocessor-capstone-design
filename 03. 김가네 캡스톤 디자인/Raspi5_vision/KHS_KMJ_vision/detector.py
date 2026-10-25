@@ -66,7 +66,7 @@ def main():
         "tts_executable": "/usr/bin/espeak-ng",
         "playback_executable": "/usr/bin/aplay",
         "cache_dir": "~/.cache/kimgane-haptic/tts",
-        "output_device": "plughw:2,0",
+        "output_device": "plughw:3,0",
         "input_device": 1 
     }
     
