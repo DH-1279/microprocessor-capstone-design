@@ -92,7 +92,7 @@ def main():
     config = {
         "object_model": HEF_PATH,
         "labels_file": LABELS_PATH,
-        "score_threshold": 0.4,
+        "score_threshold": 0.3, # 민감도를 높이기 위해 0.3으로 조정
         "max_objects": 20,
         "infer_timeout_ms": 1500,
         
@@ -126,7 +126,7 @@ def main():
     print("초기화 완료. 시동어 '캡스톤'을 기다리는 중...")
     audio_service.say("시스템이 준비되었습니다. 캡스톤이라고 말씀해주세요.")
 
-    # 상태 정의: "WAIT_WAKE" (시동어 대기) -> "WAIT_TARGET" (찾을 물건 대기) -> "SEARCHING" (거리 계산 및 안내)
+    # 상태 정의: "WAIT_WAKE" -> "WAIT_TARGET" -> "SEARCHING"
     state = "WAIT_WAKE"
     target_eng_label = None
 
@@ -157,6 +157,11 @@ def main():
                 # 현재 화면에 인식된 객체 한글 이름 리스트업
                 current_detected_labels = {det.label for det in obj_detections} if obj_detections else set()
                 current_korean_list = [get_korean_name(l) for l in current_detected_labels]
+
+                # [디버깅 추가] 현재 화면에 감지된 원본 영어 라벨과 점수 출력
+                if obj_detections:
+                    detected_str = ", ".join([f"{det.label}({det.score:.2f})" for det in obj_detections])
+                    print(f"🔍 [실시간 감지됨]: {detected_str}")
 
                 # STT 명령 처리
                 command_text = None
@@ -194,15 +199,12 @@ def main():
                         # 손과의 거리 계산 (손이 인식될 경우)
                         landmarks = getattr(tracker, "last_landmarks", None)
                         if landmarks is not None:
-                            # 검지 손가락 끝(인덱스 8)과 물체 중심 간 거리 계산 예시
                             tip_x = int(landmarks[8].x * width)
                             tip_y = int(landmarks[8].y * height)
                             distance = math.hypot(center_x - tip_x, center_y - tip_y)
                             print(f"📍 [탐색 중] {get_korean_name(target_eng_label)} | 손과 거리: {distance:.1f}px")
                     else:
                         print(f"⚠️ {get_korean_name(target_eng_label)}을(를) 화면에서 찾을 수 없습니다.")
-
-                    # 리셋 명령이나 종료 명령 처리 등 필요시 추가 가능
 
                 # 화면 시각화 (바운딩 박스 및 중앙 점 유지)
                 if obj_detections:
@@ -216,11 +218,10 @@ def main():
                         kor_name = get_korean_name(det.label)
                         is_target = (state == "SEARCHING" and det.label == target_eng_label)
 
-                        # 색상 설정 (타겟이면 노란색, 일반이면 초록색)
                         box_color = (0, 255, 255) if is_target else (0, 255, 0)
 
                         cv2.rectangle(display_frame, pt1, pt2, box_color, 2)
-                        # [핵심 요구사항] 바운딩 박스 중앙에 점 찍기 유지
+                        # [요청 사항] 바운딩 박스 중앙에 점 찍기 유지
                         cv2.circle(display_frame, (center_x, center_y), 5, (0, 0, 255), -1)
                         cv2.putText(display_frame, f"{kor_name}: {det.score:.2f}", (pt1[0], max(pt1[1] - 8, 15)), 
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, box_color, 2)
