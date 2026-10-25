@@ -71,7 +71,7 @@ def main():
     }
     
     # 3. 컨트롤러(추적/음성 대사) 설정 (타겟 별칭 및 민감도 대폭 보완)
-controller_config = {
+    controller_config = {
         "targets": {
             "Earbud": {"name": "이어폰", "aliases": ["무선 이어폰", "이어버드", "이어폰"]},
             "bottle": {"name": "물병", "aliases": ["병", "페트병", "물병"]},
