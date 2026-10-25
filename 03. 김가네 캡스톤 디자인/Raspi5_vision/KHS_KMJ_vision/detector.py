@@ -20,7 +20,7 @@ import speech #[cite: 3]
 # STT -> 메인 비전 루프 통신 큐
 command_queue = queue.Queue()
 
-# 목표 대상 사전 (speech.py 참조용)[cite: 3]
+# 목표 대상 사전 (labels.txt 기준 업데이트)[cite: 3]
 TARGETS = {
     "Earbud": {"name": "이어폰", "aliases": ["무선 이어폰", "이어버드"]},
     "bottle": {"name": "물병", "aliases": ["병", "페트병"]},
@@ -36,7 +36,7 @@ TARGETS = {
 }
 
 # ==========================================
-# [긴급 패치] 신뢰도 및 박스 좌표 오차 우회
+# [긴급 패치] 신뢰도 및 박스 좌표 오차 우회[cite: 1]
 # ==========================================
 def patched_decode_hailo_nms(raw, labels, geometry, threshold=0.5, max_objects=20):
     found = []
@@ -72,55 +72,75 @@ def play_tts(text):
         print(f"TTS 재생 실패: {e}")
 
 # ==========================================
-# 음성 인식 (STT) 및 파싱 스레드[cite: 4, 5]
+# 음성 인식 (STT) 및 파싱 스레드 (시동어 적용)[cite: 4, 5]
 # ==========================================
 def audio_pipeline_thread():
-    """sounddevice/arecord로 녹음하고 whisper.cpp로 텍스트를 추출한 뒤 speech.py로 파싱합니다."""
-    print("🎙️ [음성 스레드] 대기 중... (음성 인식 루프 시작)")
+    """마이크 녹음 후 whisper.cpp로 텍스트를 추출하고 시동어 확인 및 파싱을 수행합니다."""
+    print("🎙️ [음성 스레드] 대기 중... (시동어 기반 인식 루프 시작)")
     mic_wav = "/tmp/kimgane-mic.wav"
-    whisper_bin = str(Path(PROJECT_ROOT).parent.parent / "whisper.cpp" / "build" / "bin" / "whisper-cli")
+    whisper_bin = "/home/dh1279/Desktop/kimGA_raspi/whisper.cpp/build/bin/whisper-cli"
     model_bin = str(Path(PROJECT_ROOT) / "models" / "ggml-tiny.bin")
 
-    # 초기 안내 음성 재생
-    play_tts("시스템이 준비되었습니다. 찾을 물건을 말씀해주세요.")
+    WAKE_WORD = "캡스톤"
+    is_awake = False
+
+    play_tts(f"시스템이 준비되었습니다. '{WAKE_WORD}'이라고 부른 뒤 찾을 물건을 말씀해주세요.")
 
     while True:
         try:
-            # 1. 3초간 마이크 녹음 (실제 환경의 sounddevice VAD 로직으로 대체 가능)[cite: 4]
-            # print("🔴 녹음 중...")
+            # 1. 3초간 마이크 녹음[cite: 4, 5]
             subprocess.run(["arecord", "-f", "S16_LE", "-r", "16000", "-c", "1", "-d", "3", mic_wav], 
                            stderr=subprocess.DEVNULL, check=True)
             
-            # 2. Whisper.cpp를 통한 텍스트 추출
-            # print("🔄 STT 변환 중...")
+            # 2. Whisper.cpp STT 변환[cite: 5]
             result = subprocess.run([whisper_bin, "-m", model_bin, "-l", "ko", "-f", mic_wav, "-nt"], 
                                     capture_output=True, text=True)
             raw_text = result.stdout.strip()
             
-            if not raw_text:
-                continue
-
+            if not raw_text: continue
             print(f"\n🗣️ [사용자 발화]: {raw_text}")
 
-            # 3. 문법 파싱 및 의도 추출[cite: 3]
-            intent = speech.parse(raw_text, TARGETS, state="any")
+            command_text = raw_text
+
+            # 3. 시동어 감지
+            if WAKE_WORD in raw_text:
+                is_awake = True
+                
+                # speech.py 오류 방지를 위해 시동어 및 문장 부호 제거
+                command_text = raw_text.replace(WAKE_WORD, "").strip()
+                for mark in ".,!?;:": 
+                    command_text = command_text.replace(mark, " ")
+                command_text = command_text.strip()
+                
+                if not command_text:
+                    play_tts("네, 말씀하세요.")
+                    continue
+
+            # 대기 상태일 때 일상 대화 무시
+            if not is_awake:
+                continue
+
+            # 4. 명령어 파싱 및 의도 추출[cite: 3]
+            intent = speech.parse(command_text, TARGETS, state="any")
             
             if intent.kind == "target":
                 command_queue.put(intent.name)
                 target_kr = TARGETS.get(intent.name, {}).get("name", intent.name)
                 play_tts(f"{target_kr} 안내를 시작합니다.")
+                is_awake = False  # 타겟 설정 완료 후 대기 모드 복귀
+                
             elif intent.reason not in ("empty", "ok"):
-                # 파싱 실패 시 거절 사유 TTS 재생[cite: 3]
                 refusal_msg = speech.refusal_speech(intent)
                 if refusal_msg:
                     play_tts(refusal_msg)
+                is_awake = False  # 실패 시 안내 후 대기 모드 복귀
 
         except Exception as e:
             print(f"STT 스레드 에러: {e}")
             time.sleep(1)
 
 # ==========================================
-# 메인 비전 루프
+# 메인 비전 루프[cite: 1, 6]
 # ==========================================
 def main():
     BASE_DIR = Path(__file__).resolve().parent
@@ -136,7 +156,7 @@ def main():
         "source": "picamera2", "width": 1280, "height": 720, "fps": 15, "device": 0
     }
 
-    # 오디오(STT/TTS) 스레드 백그라운드 시작
+    # 오디오 스레드 백그라운드 실행
     threading.Thread(target=audio_pipeline_thread, daemon=True).start()
 
     current_target = None
@@ -159,7 +179,7 @@ def main():
                 if read_result is None: break
                 frame, timestamp = read_result
                 
-                # 2. AI 추론[cite: 1]
+                # 2. AI 추론 (Hailo 객체 탐지 및 MediaPipe 손 추적)[cite: 1, 6]
                 obj_detections = detector.detect(frame)
                 hand_result = tracker.detect(frame, timestamp)
 
@@ -181,7 +201,7 @@ def main():
                             cv2.putText(display_frame, f"TARGET: {det.label} {det.score:.2f}", 
                                         (pt1[0], max(pt1[1] - 10, 15)), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
                             
-                            # 손가락 관절과의 거리 계산[cite: 1]
+                            # 손가락 관절과의 거리 연산[cite: 1]
                             if landmarks is not None:
                                 dist_strs = []
                                 for idx, name in zip((4, 8, 12, 16, 20), ("엄지", "검지", "중지", "약지", "새끼")):
@@ -190,7 +210,7 @@ def main():
                                     dist_strs.append(f"{name}: {dist:.0f}px")
                                 print(f"🎯 [타겟 발견] {det.label} | 손과의 거리: " + " / ".join(dist_strs))
                         
-                        # 목표물이 아닌 일반 객체인 경우: 기존처럼 초록색 렌더링[cite: 1]
+                        # 일반 객체인 경우: 초록색 렌더링[cite: 1]
                         else:
                             cv2.rectangle(display_frame, pt1, pt2, (0, 255, 0), 2)
                             cv2.putText(display_frame, f"{det.label}: {det.score:.2f}", 
@@ -201,7 +221,7 @@ def main():
                     draw_hand(cv2, display_frame, tracker, hand_result)
 
                 # 화면 상단 상태 표시
-                status_text = f"Target: {current_target if current_target else 'None'}"
+                status_text = f"Target: {current_target if current_target else 'None (Waiting for Wake-word)'}"
                 cv2.putText(display_frame, status_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
                 
                 cv2.imshow(window_name, display_frame)
