@@ -71,7 +71,7 @@ def main():
     }
     
     # 3. 컨트롤러(추적/음성 대사) 설정 (타겟 별칭 및 민감도 대폭 보완)
-    controller_config = {
+controller_config = {
         "targets": {
             "Earbud": {"name": "이어폰", "aliases": ["무선 이어폰", "이어버드", "이어폰"]},
             "bottle": {"name": "물병", "aliases": ["병", "페트병", "물병"]},
@@ -85,8 +85,12 @@ def main():
             "Tumbler": {"name": "텀블러", "aliases": ["보온병", "물통", "텀블러"]},
             "Wallet": {"name": "지갑", "aliases": ["카드지갑", "동전지갑", "지갑"]}
         },
-        "tracking_iou": 0.2, "ambiguity_margin": 0.1, "max_frame_age_s": 0.5,
-        "object_score": 0.4, "hand_score": 0.5, "stable_frames": 1,  # 안정화 프레임을 1로 낮춰 즉시 인식
+        "tracking_iou": 0.05,       # 기존 0.2에서 대폭 낮춰서 박스가 조금 흔들려도 같은 물체로 인정
+        "ambiguity_margin": 0.1, 
+        "max_frame_age_s": 2.0,     # 기존 0.5초에서 늘려 물체가 잠깐 가려져도 기억하도록 수정
+        "object_score": 0.3,        # 스코어 허용치도 더 낮춤
+        "hand_score": 0.4, 
+        "stable_frames": 1,
         "image_aspect": 1280/720, "side_separation": 0.1,
         "near_distance": 0.2, "middle_distance": 0.5, "rotation_deg": 0, "flip_x": False,
         "strengths": {"near": 3, "middle": 2, "far": 1},
