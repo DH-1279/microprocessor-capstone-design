@@ -88,11 +88,40 @@ def match_target(text: str, detected_labels: set) -> str | None:
                 return eng_label
     return None
 
+# ==========================================
+# [시각화 헬퍼 함수] 점선 그리기 및 외곽선 텍스트
+# ==========================================
+def draw_dashed_line(img, pt1, pt2, color=(25, 25, 25), thickness=2, dash_len=8, gap_len=6):
+    """어두운 배경에서도 잘 보이도록 은은한 밝은 배경선 위에 검정(차콜) 점선을 그립니다."""
+    dist = math.hypot(pt2[0] - pt1[0], pt2[1] - pt1[1])
+    if dist == 0:
+        return
+    dx = (pt2[0] - pt1[0]) / dist
+    dy = (pt2[1] - pt1[1]) / dist
+
+    curr = 0
+    while curr < dist:
+        start_x = int(pt1[0] + dx * curr)
+        start_y = int(pt1[1] + dy * curr)
+        end_curr = min(curr + dash_len, dist)
+        end_x = int(pt1[0] + dx * end_curr)
+        end_y = int(pt1[1] + dy * end_curr)
+
+        # 가시성을 위한 얇은 밝은 회색 외곽선 후 검정(차콜) 점선 그리기
+        cv2.line(img, (start_x, start_y), (end_x, end_y), (220, 220, 220), thickness + 2, cv2.LINE_AA)
+        cv2.line(img, (start_x, start_y), (end_x, end_y), color, thickness, cv2.LINE_AA)
+        curr += dash_len + gap_len
+
+def put_readable_text(img, text, pos, font_scale=0.5, text_color=(20, 20, 20), outline_color=(245, 245, 245), thickness=1):
+    """배경색에 상관없이 잘 보이도록 외곽선이 있는 텍스트를 출력합니다."""
+    cv2.putText(img, text, pos, cv2.FONT_HERSHEY_SIMPLEX, font_scale, outline_color, thickness + 2, cv2.LINE_AA)
+    cv2.putText(img, text, pos, cv2.FONT_HERSHEY_SIMPLEX, font_scale, text_color, thickness, cv2.LINE_AA)
+
 def main():
     config = {
         "object_model": HEF_PATH,
         "labels_file": LABELS_PATH,
-        "score_threshold": 0.3, # 민감도를 높이기 위해 0.3으로 조정
+        "score_threshold": 0.3,
         "max_objects": 20,
         "infer_timeout_ms": 1500,
         
@@ -130,7 +159,6 @@ def main():
     state = "WAIT_WAKE"
     target_eng_label = None
 
-    # 손가락 끝 인덱스 및 이름 정의
     fingertip_indices = (4, 8, 12, 16, 20)
     tip_names = ("엄지", "검지", "중지", "약지", "새끼")
 
@@ -162,7 +190,6 @@ def main():
                 current_detected_labels = {det.label for det in obj_detections} if obj_detections else set()
                 current_korean_list = [get_korean_name(l) for l in current_detected_labels]
 
-                # [디버깅 추가] 현재 화면에 감지된 원본 영어 라벨과 점수 출력
                 if obj_detections:
                     detected_str = ", ".join([f"{det.label}({det.score:.2f})" for det in obj_detections])
                     print(f"🔍 [실시간 감지됨]: {detected_str}")
@@ -193,7 +220,6 @@ def main():
                             audio_service.say("인식된 물체 중에 없습니다. 다시 말씀해 주세요.")
 
                 elif state == "SEARCHING":
-                    # 타겟이 여전히 화면에 있는지 확인
                     found_target = next((det for det in obj_detections if det.label == target_eng_label), None)
                     target_kor = get_korean_name(target_eng_label)
 
@@ -202,14 +228,16 @@ def main():
                         center_x = int(((x1 + x2) / 2) * width)
                         center_y = int(((y1 + y2) / 2) * height)
 
-                        # 목표 물체 좌표 출력
                         print(f"\n🎯 [탐색 중] 목표: {target_kor} ({target_eng_label}) | 중심 픽셀: ({center_x}, {center_y})")
 
-                        # 손이 인식될 경우 각 손가락 끝 좌표 및 거리 계산/출력
                         landmarks = getattr(tracker, "last_landmarks", None)
                         if landmarks is not None:
                             coord_strs = []
                             dist_strs = []
+                            
+                            # 반투명 효과를 위해 오버레이 레이어 생성 (명도 및 시각적 피로도 조절)
+                            overlay = display_frame.copy()
+
                             for idx, name in zip(fingertip_indices, tip_names):
                                 tip_x = int(landmarks[idx].x * width)
                                 tip_y = int(landmarks[idx].y * height)
@@ -217,7 +245,18 @@ def main():
                                 
                                 coord_strs.append(f"{name}({tip_x},{tip_y})")
                                 dist_strs.append(f"{name}: {dist:.1f}px")
-                                
+
+                                # 1. 각 손가락 끝과 목표 물체 중심 사이에 점선 그리기 (차콜 블랙: (30, 30, 30))
+                                draw_dashed_line(overlay, (tip_x, tip_y), (center_x, center_y), color=(30, 30, 30), thickness=2)
+
+                                # 2. 점선 중간 위치 계산 및 거리 텍스트 표시
+                                mid_x = int((tip_x + center_x) / 2)
+                                mid_y = int((tip_y + center_y) / 2)
+                                put_readable_text(overlay, f"{dist:.0f}px", (mid_x - 15, mid_y), font_scale=0.45)
+
+                            # 원본 프레임과 오버레이를 75:25 비율로 블렌딩하여 자연스러운 명도 구현
+                            cv2.addWeighted(overlay, 0.75, display_frame, 0.25, 0, display_frame)
+
                             print(f"    ├ 📍 손가락 절대 좌표: " + ", ".join(coord_strs))
                             print(f"    └ 📏 목표와의 거리: " + " / ".join(dist_strs))
                         else:
@@ -225,9 +264,13 @@ def main():
                     else:
                         print(f"⚠️ {target_kor}을(를) 화면에서 찾을 수 없습니다.")
 
-                # 화면 시각화 (바운딩 박스 및 중앙 점 유지)
+                # 화면 시각화 (바운딩 박스, 중앙 점, 좌측 하단 좌표 리스트)
                 if obj_detections:
-                    for det in obj_detections:
+                    # 좌측 하단 리스트 시작 Y 좌표 설정 (아래에서 위로 쌓기)
+                    base_y = height - 20
+                    line_height = 25
+
+                    for i, det in enumerate(obj_detections):
                         x1, y1, x2, y2 = det.box
                         center_x = int(((x1 + x2) / 2) * width)
                         center_y = int(((y1 + y2) / 2) * height)
@@ -240,18 +283,26 @@ def main():
                         box_color = (0, 255, 255) if is_target else (0, 255, 0)
 
                         cv2.rectangle(display_frame, pt1, pt2, box_color, 2)
-                        # [요청 사항] 바운딩 박스 중앙에 점 찍기 유지
                         cv2.circle(display_frame, (center_x, center_y), 5, (0, 0, 255), -1)
-                        cv2.putText(display_frame, f"{kor_name}: {det.score:.2f}", (pt1[0], max(pt1[1] - 8, 15)), 
+                        
+                        # OpenCV 기본 폰트는 한글이 깨질 수 있으므로 영문 라벨 병기 또는 영문 표시
+                        cv2.putText(display_frame, f"{det.label}: {det.score:.2f}", (pt1[0], max(pt1[1] - 8, 15)), 
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, box_color, 2)
+
+                        # 3. 화면 왼쪽 아래에 인식된 물체 좌표 세로 나열
+                        list_y = base_y - (i * line_height)
+                        coord_info = f"{det.label} : ({center_x}, {center_y})"
+                        put_readable_text(display_frame, coord_info, (15, list_y), font_scale=0.6, 
+                                          text_color=(20, 20, 20), outline_color=(255, 255, 255), thickness=2)
 
                 if hand_result is not None:
                     draw_hand(cv2, display_frame, tracker, hand_result)
 
-                # 상단에 현재 인식된 물체 리스트 및 상태 실시간 갱신 표시
-                list_str = ", ".join(current_korean_list) if current_korean_list else "없음"
+                # 상단 상태 표시줄
+                list_str = ", ".join(current_detected_labels) if current_detected_labels else "None"
                 status_msg = f"State: {state} | Detected: [{list_str}]"
-                cv2.putText(display_frame, status_msg, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+                put_readable_text(display_frame, status_msg, (10, 30), font_scale=0.65, 
+                                  text_color=(255, 255, 255), outline_color=(0, 0, 0), thickness=2)
                 
                 cv2.imshow(window_name, display_frame)
                 
