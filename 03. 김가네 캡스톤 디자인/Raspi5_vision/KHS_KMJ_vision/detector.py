@@ -69,7 +69,7 @@ def main():
         "playback_executable": "/usr/bin/aplay",
         "cache_dir": "~/.cache/kimgane-haptic/tts",
         "output_device": "plughw:2,0",
-        "input_device": "plughw:2,0" 
+        "input_device": 1
     }
     
     # 3. 컨트롤러(추적/음성 대사) 설정
