@@ -1,10 +1,13 @@
 import sys
+import os
 import cv2
 import math
-import os
 import queue
 import time
 from pathlib import Path
+
+# PortAudio(sounddevice)가 hw 대신 plughw(리샘플링)를 사용하도록 강제하여 주파수 에러 우회
+os.environ["PA_ALSA_PLUGHW"] = "1"
 
 PROJECT_ROOT = "/home/dh1279/Desktop/kimGA_raspi/microprocessor-capstone-design/03. 김가네 캡스톤 디자인/Raspi5_vision"
 sys.path.append(PROJECT_ROOT)
@@ -16,12 +19,6 @@ from hand_tracker import HandTracker, draw_hand
 
 from audio import AudioService
 from controller import Controller
-
-# PortAudio(sounddevice)가 hw 대신 plughw(리샘플링)를 사용하도록 강제
-os.environ["PA_ALSA_PLUGHW"] = "1"
-
-PROJECT_ROOT = "/home/dh1279/Desktop/kimGA_raspi/microprocessor-capstone-design/03. 김가네 캡스톤 디자인/Raspi5_vision"
-sys.path.append(PROJECT_ROOT)
 
 # ==========================================
 # [긴급 패치] NMS 오차 우회
@@ -61,7 +58,7 @@ def main():
         "source": "picamera2", "width": 1280, "height": 720, "fps": 15, "device": 0
     }
     
-    # 2. 오디오 설정 (절대 경로 적용)
+    # 2. 오디오 설정 (장치 번호 및 절대 경로 적용)
     audio_config = {
         "enabled": True,
         "whisper_executable": "/home/dh1279/Desktop/kimGA_raspi/whisper.cpp/build/bin/whisper-cli",
@@ -69,11 +66,11 @@ def main():
         "tts_executable": "/usr/bin/espeak-ng",
         "playback_executable": "/usr/bin/aplay",
         "cache_dir": "~/.cache/kimgane-haptic/tts",
-        "output_device": "plughw:3,0",
-        "input_device": 1
+        "output_device": "plughw:2,0",
+        "input_device": 1 
     }
     
-    # 3. 컨트롤러(추적/음성 대사) 설정
+    # 3. 컨트롤러(추적/음성 대사) 설정 (타겟 별칭 및 민감도 대폭 보완)
     controller_config = {
         "targets": {
             "Earbud": {"name": "이어폰", "aliases": ["무선 이어폰", "이어버드", "이어폰"]},
@@ -89,7 +86,7 @@ def main():
             "Wallet": {"name": "지갑", "aliases": ["카드지갑", "동전지갑", "지갑"]}
         },
         "tracking_iou": 0.2, "ambiguity_margin": 0.1, "max_frame_age_s": 0.5,
-        "object_score": 0.5, "hand_score": 0.6, "stable_frames": 3,
+        "object_score": 0.4, "hand_score": 0.5, "stable_frames": 1,  # 안정화 프레임을 1로 낮춰 즉시 인식
         "image_aspect": 1280/720, "side_separation": 0.1,
         "near_distance": 0.2, "middle_distance": 0.5, "rotation_deg": 0, "flip_x": False,
         "strengths": {"near": 3, "middle": 2, "far": 1},
@@ -153,9 +150,10 @@ def main():
                         center_y = int(((y1 + y2) / 2) * height)
                         pt1, pt2 = (int(x1 * width), int(y1 * height)), (int(x2 * width), int(y2 * height))
 
-                        # 현재 타겟 객체: 노란색 강조 + 거리 계산
+                        # 현재 타겟 객체: 노란색 강조 + 중심점(빨간색 원) + 거리 계산
                         if controller.target_label and det.label == controller.target_label:
                             cv2.rectangle(display_frame, pt1, pt2, (0, 255, 255), 3)
+                            cv2.circle(display_frame, (center_x, center_y), 5, (0, 0, 255), -1)  # 중앙 점 복구
                             cv2.putText(display_frame, f"TARGET: {det.label} {det.score:.2f}", 
                                         (pt1[0], max(pt1[1] - 10, 15)), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
                             
