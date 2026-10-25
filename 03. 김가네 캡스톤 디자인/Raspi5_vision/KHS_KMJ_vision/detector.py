@@ -16,6 +16,12 @@ from hand_tracker import HandTracker, draw_hand
 from audio import AudioService
 from controller import Controller
 
+# PortAudio(sounddevice)가 hw 대신 plughw(리샘플링)를 사용하도록 강제
+os.environ["PA_ALSA_PLUGHW"] = "1"
+
+PROJECT_ROOT = "/home/dh1279/Desktop/kimGA_raspi/microprocessor-capstone-design/03. 김가네 캡스톤 디자인/Raspi5_vision"
+sys.path.append(PROJECT_ROOT)
+
 # ==========================================
 # [긴급 패치] NMS 오차 우회
 # ==========================================
