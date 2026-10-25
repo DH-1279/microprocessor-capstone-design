@@ -130,6 +130,10 @@ def main():
     state = "WAIT_WAKE"
     target_eng_label = None
 
+    # 손가락 끝 인덱스 및 이름 정의
+    fingertip_indices = (4, 8, 12, 16, 20)
+    tip_names = ("엄지", "검지", "중지", "약지", "새끼")
+
     try:
         with CameraSource(config) as cam, \
              HailoDetector(config) as detector, \
@@ -191,20 +195,35 @@ def main():
                 elif state == "SEARCHING":
                     # 타겟이 여전히 화면에 있는지 확인
                     found_target = next((det for det in obj_detections if det.label == target_eng_label), None)
+                    target_kor = get_korean_name(target_eng_label)
+
                     if found_target:
                         x1, y1, x2, y2 = found_target.box
                         center_x = int(((x1 + x2) / 2) * width)
                         center_y = int(((y1 + y2) / 2) * height)
 
-                        # 손과의 거리 계산 (손이 인식될 경우)
+                        # 목표 물체 좌표 출력
+                        print(f"\n🎯 [탐색 중] 목표: {target_kor} ({target_eng_label}) | 중심 픽셀: ({center_x}, {center_y})")
+
+                        # 손이 인식될 경우 각 손가락 끝 좌표 및 거리 계산/출력
                         landmarks = getattr(tracker, "last_landmarks", None)
                         if landmarks is not None:
-                            tip_x = int(landmarks[8].x * width)
-                            tip_y = int(landmarks[8].y * height)
-                            distance = math.hypot(center_x - tip_x, center_y - tip_y)
-                            print(f"📍 [탐색 중] {get_korean_name(target_eng_label)} | 손과 거리: {distance:.1f}px")
+                            coord_strs = []
+                            dist_strs = []
+                            for idx, name in zip(fingertip_indices, tip_names):
+                                tip_x = int(landmarks[idx].x * width)
+                                tip_y = int(landmarks[idx].y * height)
+                                dist = math.hypot(center_x - tip_x, center_y - tip_y)
+                                
+                                coord_strs.append(f"{name}({tip_x},{tip_y})")
+                                dist_strs.append(f"{name}: {dist:.1f}px")
+                                
+                            print(f"    ├ 📍 손가락 절대 좌표: " + ", ".join(coord_strs))
+                            print(f"    └ 📏 목표와의 거리: " + " / ".join(dist_strs))
+                        else:
+                            print("    └ 🖐️ 손이 감지되지 않았습니다.")
                     else:
-                        print(f"⚠️ {get_korean_name(target_eng_label)}을(를) 화면에서 찾을 수 없습니다.")
+                        print(f"⚠️ {target_kor}을(를) 화면에서 찾을 수 없습니다.")
 
                 # 화면 시각화 (바운딩 박스 및 중앙 점 유지)
                 if obj_detections:
