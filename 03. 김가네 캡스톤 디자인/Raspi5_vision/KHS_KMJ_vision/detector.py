@@ -1,6 +1,7 @@
 import sys
 import cv2
 import math
+import os
 import queue
 import time
 from pathlib import Path
@@ -68,24 +69,24 @@ def main():
         "tts_executable": "/usr/bin/espeak-ng",
         "playback_executable": "/usr/bin/aplay",
         "cache_dir": "~/.cache/kimgane-haptic/tts",
-        "output_device": "plughw:2,0",
+        "output_device": "plughw:3,0",
         "input_device": 1
     }
     
     # 3. 컨트롤러(추적/음성 대사) 설정
     controller_config = {
         "targets": {
-            "Earbud": {"name": "이어폰", "aliases": ["무선 이어폰", "이어버드"]},
-            "bottle": {"name": "물병", "aliases": ["병", "페트병"]},
-            "cell phone": {"name": "휴대폰", "aliases": ["스마트폰", "핸드폰"]},
-            "cup": {"name": "컵", "aliases": ["머그컵", "종이컵"]},
-            "remote": {"name": "리모컨", "aliases": ["리모콘"]},
-            "Glasses": {"name": "안경", "aliases": ["돋보기안경", "돋보기"]},
-            "Medicine": {"name": "약통", "aliases": ["약", "알약"]},
-            "key": {"name": "열쇠", "aliases": ["차키", "키"]},
-            "Pen": {"name": "볼펜", "aliases": ["펜", "연필"]},
-            "Tumbler": {"name": "텀블러", "aliases": ["보온병", "물통"]},
-            "Wallet": {"name": "지갑", "aliases": ["카드지갑", "동전지갑"]}
+            "Earbud": {"name": "이어폰", "aliases": ["무선 이어폰", "이어버드", "이어폰"]},
+            "bottle": {"name": "물병", "aliases": ["병", "페트병", "물병"]},
+            "cell phone": {"name": "휴대폰", "aliases": ["스마트폰", "핸드폰", "휴대폰"]},
+            "cup": {"name": "컵", "aliases": ["머그컵", "종이컵", "컵"]},
+            "remote": {"name": "리모컨", "aliases": ["리모컨", "리모콘", "리모칸"]},
+            "Glasses": {"name": "안경", "aliases": ["돋보기안경", "돋보기", "안경"]},
+            "Medicine": {"name": "약통", "aliases": ["약", "알약", "약통"]},
+            "key": {"name": "열쇠", "aliases": ["차키", "키", "열쇠"]},
+            "Pen": {"name": "볼펜", "aliases": ["펜", "연필", "볼펜"]},
+            "Tumbler": {"name": "텀블러", "aliases": ["보온병", "물통", "텀블러"]},
+            "Wallet": {"name": "지갑", "aliases": ["카드지갑", "동전지갑", "지갑"]}
         },
         "tracking_iou": 0.2, "ambiguity_margin": 0.1, "max_frame_age_s": 0.5,
         "object_score": 0.5, "hand_score": 0.6, "stable_frames": 3,
