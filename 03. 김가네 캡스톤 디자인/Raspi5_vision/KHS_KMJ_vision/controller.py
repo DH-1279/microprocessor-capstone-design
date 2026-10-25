@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import math
 import re
 
-from .models import Decision, Detection, Observation
+from haptic_mvp.models import Decision, Detection, Observation
 
 
 def iou(a: tuple, b: tuple) -> float:
