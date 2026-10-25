@@ -16,6 +16,12 @@ from hand_tracker import HandTracker, draw_hand
 from audio import AudioService
 from controller import Controller
 
+# PortAudio(sounddevice)가 hw 대신 plughw(리샘플링)를 사용하도록 강제
+os.environ["PA_ALSA_PLUGHW"] = "1"
+
+PROJECT_ROOT = "/home/dh1279/Desktop/kimGA_raspi/microprocessor-capstone-design/03. 김가네 캡스톤 디자인/Raspi5_vision"
+sys.path.append(PROJECT_ROOT)
+
 # ==========================================
 # [긴급 패치] NMS 오차 우회
 # ==========================================
@@ -63,7 +69,7 @@ def main():
         "playback_executable": "/usr/bin/aplay",
         "cache_dir": "~/.cache/kimgane-haptic/tts",
         "output_device": "plughw:2,0",
-        "input_device": "plughw:2,0" 
+        "input_device": 1
     }
     
     # 3. 컨트롤러(추적/음성 대사) 설정
