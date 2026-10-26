@@ -59,7 +59,6 @@ HEF_PATH = str(BASE_DIR / "models" / "best.hef")
 LABELS_PATH = str(BASE_DIR / "config" / "labels.txt")
 HAND_MODEL_PATH = str(Path(PROJECT_ROOT) / "models" / "hand_landmarker.task")
 
-# 영어 모델 레이블을 한글 이름 및 별칭으로 매핑
 TARGET_MAPPING = {
     "Earbud": {"name": "이어폰", "aliases": ["이어폰", "무선이어폰", "이어버드"]},
     "bottle": {"name": "물병", "aliases": ["물병", "병", "페트병"]},
@@ -88,11 +87,7 @@ def match_target(text: str, detected_labels: set) -> str | None:
                 return eng_label
     return None
 
-# ==========================================
-# [시각화 헬퍼 함수] 점선 그리기 및 외곽선 텍스트
-# ==========================================
-def draw_dashed_line(img, pt1, pt2, color=(25, 25, 25), thickness=2, dash_len=8, gap_len=6):
-    """어두운 배경에서도 잘 보이도록 은은한 밝은 배경선 위에 검정(차콜) 점선을 그립니다."""
+def draw_dashed_line(img, pt1, pt2, color=(30, 30, 30), thickness=2, dash_len=8, gap_len=6):
     dist = math.hypot(pt2[0] - pt1[0], pt2[1] - pt1[1])
     if dist == 0:
         return
@@ -107,13 +102,11 @@ def draw_dashed_line(img, pt1, pt2, color=(25, 25, 25), thickness=2, dash_len=8,
         end_x = int(pt1[0] + dx * end_curr)
         end_y = int(pt1[1] + dy * end_curr)
 
-        # 가시성을 위한 얇은 밝은 회색 외곽선 후 검정(차콜) 점선 그리기
         cv2.line(img, (start_x, start_y), (end_x, end_y), (220, 220, 220), thickness + 2, cv2.LINE_AA)
         cv2.line(img, (start_x, start_y), (end_x, end_y), color, thickness, cv2.LINE_AA)
         curr += dash_len + gap_len
 
 def put_readable_text(img, text, pos, font_scale=0.5, text_color=(20, 20, 20), outline_color=(245, 245, 245), thickness=1):
-    """배경색에 상관없이 잘 보이도록 외곽선이 있는 텍스트를 출력합니다."""
     cv2.putText(img, text, pos, cv2.FONT_HERSHEY_SIMPLEX, font_scale, outline_color, thickness + 2, cv2.LINE_AA)
     cv2.putText(img, text, pos, cv2.FONT_HERSHEY_SIMPLEX, font_scale, text_color, thickness, cv2.LINE_AA)
 
@@ -155,9 +148,13 @@ def main():
     print("초기화 완료. 시동어 '캡스톤'을 기다리는 중...")
     audio_service.say("시스템이 준비되었습니다. 캡스톤이라고 말씀해주세요.")
 
-    # 상태 정의: "WAIT_WAKE" -> "WAIT_TARGET" -> "SEARCHING"
     state = "WAIT_WAKE"
     target_eng_label = None
+    
+    # 위치 고정 및 타임아웃 관리를 위한 변수들
+    locked_target_box = None     
+    locked_center = None         
+    missing_frame_count = 0      # 물체가 보이지 않은 누적 프레임 카운트
 
     fingertip_indices = (4, 8, 12, 16, 20)
     tip_names = ("엄지", "검지", "중지", "약지", "새끼")
@@ -179,22 +176,15 @@ def main():
                     
                 frame, timestamp = read_result
                 
-                # 비전 추론
                 obj_detections = detector.detect(frame)
                 hand_result = tracker.detect(frame, timestamp)
 
                 display_frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
                 height, width = display_frame.shape[:2]
 
-                # 현재 화면에 인식된 객체 한글 이름 리스트업
                 current_detected_labels = {det.label for det in obj_detections} if obj_detections else set()
                 current_korean_list = [get_korean_name(l) for l in current_detected_labels]
 
-                if obj_detections:
-                    detected_str = ", ".join([f"{det.label}({det.score:.2f})" for det in obj_detections])
-                    print(f"🔍 [실시간 감지됨]: {detected_str}")
-
-                # STT 명령 처리
                 command_text = None
                 if not command_queue.empty():
                     command_text = command_queue.get_nowait()
@@ -214,6 +204,14 @@ def main():
                             target_eng_label = matched
                             state = "SEARCHING"
                             target_kor = get_korean_name(matched)
+                            
+                            found_target = next((det for det in obj_detections if det.label == target_eng_label), None)
+                            if found_target:
+                                locked_target_box = found_target.box
+                                x1, y1, x2, y2 = locked_target_box
+                                locked_center = (int(((x1 + x2) / 2) * width), int(((y1 + y2) / 2) * height))
+                            missing_frame_count = 0
+
                             print(f"🎯 타겟 설정 완료: {target_kor}")
                             audio_service.say(f"{target_kor}을(를) 찾아 안내합니다.")
                         else:
@@ -222,20 +220,60 @@ def main():
                 elif state == "SEARCHING":
                     found_target = next((det for det in obj_detections if det.label == target_eng_label), None)
                     target_kor = get_korean_name(target_eng_label)
+                    landmarks = getattr(tracker, "last_landmarks", None)
+                    hand_near_target = False
 
                     if found_target:
-                        x1, y1, x2, y2 = found_target.box
-                        center_x = int(((x1 + x2) / 2) * width)
-                        center_y = int(((y1 + y2) / 2) * height)
+                        # 물체가 화면에 감지되면 실시간 좌표 갱신 및 카운트 초기화
+                        locked_target_box = found_target.box
+                        x1, y1, x2, y2 = locked_target_box
+                        locked_center = (int(((x1 + x2) / 2) * width), int(((y1 + y2) / 2) * height))
+                        missing_frame_count = 0
+                    else:
+                        # 물체가 안 보이면 누적 프레임 증가
+                        missing_frame_count += 1
 
-                        print(f"\n🎯 [탐색 중] 목표: {target_kor} ({target_eng_label}) | 중심 픽셀: ({center_x}, {center_y})")
+                    if locked_center is not None:
+                        center_x, center_y = locked_center
 
-                        landmarks = getattr(tracker, "last_landmarks", None)
+                        # 손이 물체 근처(50px 이내)에 있는지 확인
+                        if landmarks is not None:
+                            for idx in fingertip_indices:
+                                tip_x = int(landmarks[idx].x * width)
+                                tip_y = int(landmarks[idx].y * height)
+                                if math.hypot(center_x - tip_x, center_y - tip_y) < 50.0:
+                                    hand_near_target = True
+                                    break
+
+                        # [안전장치 1] 손이 멀리 있는데 물체가 3초 이상(15fps 기준 45프레임) 안 보이면 타겟 해제
+                        if found_target is None and not hand_near_target and missing_frame_count > 45:
+                            print(f"⚠️ {target_kor}을(를) 장시간 찾을 수 없어 타겟을 해제합니다.")
+                            audio_service.say("물건을 찾을 수 없습니다. 다시 말씀해 주세요.")
+                            state = "WAIT_TARGET"
+                            target_eng_label = None
+                            locked_target_box = None
+                            locked_center = None
+                            missing_frame_count = 0
+                            continue
+
+                        # [안전장치 2] 손이 물체 근처에 닿은 상태에서 물체가 사라지면 획득 성공으로 간주
+                        if found_target is None and hand_near_target:
+                            print(f"✨ [획득 성공!] {target_kor}을(를) 집어 들었습니다!")
+                            audio_service.say(f"{target_kor}을(를) 찾았습니다.")
+                            state = "WAIT_WAKE"
+                            target_eng_label = None
+                            locked_target_box = None
+                            locked_center = None
+                            missing_frame_count = 0
+                            continue
+
+                        is_occluded = (found_target is None)
+                        status_str = " (⚠️ 손에 가려짐)" if is_occluded else ""
+                        print(f"\n🎯 [탐색 중{status_str}] 목표: {target_kor} | 중심: ({center_x}, {center_y})")
+
                         if landmarks is not None:
                             coord_strs = []
                             dist_strs = []
-                            
-                            # 반투명 효과를 위해 오버레이 레이어 생성 (명도 및 시각적 피로도 조절)
                             overlay = display_frame.copy()
 
                             for idx, name in zip(fingertip_indices, tip_names):
@@ -246,15 +284,11 @@ def main():
                                 coord_strs.append(f"{name}({tip_x},{tip_y})")
                                 dist_strs.append(f"{name}: {dist:.1f}px")
 
-                                # 1. 각 손가락 끝과 목표 물체 중심 사이에 점선 그리기 (차콜 블랙: (30, 30, 30))
                                 draw_dashed_line(overlay, (tip_x, tip_y), (center_x, center_y), color=(30, 30, 30), thickness=2)
-
-                                # 2. 점선 중간 위치 계산 및 거리 텍스트 표시
                                 mid_x = int((tip_x + center_x) / 2)
                                 mid_y = int((tip_y + center_y) / 2)
                                 put_readable_text(overlay, f"{dist:.0f}px", (mid_x - 15, mid_y), font_scale=0.45)
 
-                            # 원본 프레임과 오버레이를 75:25 비율로 블렌딩하여 자연스러운 명도 구현
                             cv2.addWeighted(overlay, 0.75, display_frame, 0.25, 0, display_frame)
 
                             print(f"    ├ 📍 손가락 절대 좌표: " + ", ".join(coord_strs))
@@ -262,38 +296,45 @@ def main():
                         else:
                             print("    └ 🖐️ 손이 감지되지 않았습니다.")
                     else:
-                        print(f"⚠️ {target_kor}을(를) 화면에서 찾을 수 없습니다.")
+                        print(f"⚠️ {target_kor}의 위치를 찾을 수 없습니다.")
 
-                # 화면 시각화 (바운딩 박스, 중앙 점, 좌측 하단 좌표 리스트)
+                # 화면 시각화 (인식된 물체들 + 좌측 하단 좌표 리스트)
                 if obj_detections:
-                    # 좌측 하단 리스트 시작 Y 좌표 설정 (아래에서 위로 쌓기)
                     base_y = height - 20
                     line_height = 25
 
                     for i, det in enumerate(obj_detections):
                         x1, y1, x2, y2 = det.box
-                        center_x = int(((x1 + x2) / 2) * width)
-                        center_y = int(((y1 + y2) / 2) * height)
+                        cx = int(((x1 + x2) / 2) * width)
+                        cy = int(((y1 + y2) / 2) * height)
                         pt1 = (int(x1 * width), int(y1 * height))
                         pt2 = (int(x2 * width), int(y2 * height))
 
                         kor_name = get_korean_name(det.label)
                         is_target = (state == "SEARCHING" and det.label == target_eng_label)
-
                         box_color = (0, 255, 255) if is_target else (0, 255, 0)
 
                         cv2.rectangle(display_frame, pt1, pt2, box_color, 2)
-                        cv2.circle(display_frame, (center_x, center_y), 5, (0, 0, 255), -1)
-                        
-                        # OpenCV 기본 폰트는 한글이 깨질 수 있으므로 영문 라벨 병기 또는 영문 표시
+                        cv2.circle(display_frame, (cx, cy), 5, (0, 0, 255), -1)
                         cv2.putText(display_frame, f"{det.label}: {det.score:.2f}", (pt1[0], max(pt1[1] - 8, 15)), 
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, box_color, 2)
 
-                        # 3. 화면 왼쪽 아래에 인식된 물체 좌표 세로 나열
                         list_y = base_y - (i * line_height)
-                        coord_info = f"{det.label} : ({center_x}, {center_y})"
+                        coord_info = f"{det.label} : ({cx}, {cy})"
                         put_readable_text(display_frame, coord_info, (15, list_y), font_scale=0.6, 
                                           text_color=(20, 20, 20), outline_color=(255, 255, 255), thickness=2)
+
+                # 손에 가려져 실시간 감지는 안 되지만 고정된 타겟이 있을 때 주황색 박스 표시
+                if state == "SEARCHING" and locked_target_box is not None and found_target is None:
+                    x1, y1, x2, y2 = locked_target_box
+                    pt1 = (int(x1 * width), int(y1 * height))
+                    pt2 = (int(x2 * width), int(y2 * height))
+                    cx, cy = locked_center
+
+                    cv2.rectangle(display_frame, pt1, pt2, (0, 165, 255), 2, cv2.LINE_AA)
+                    cv2.circle(display_frame, (cx, cy), 6, (0, 165, 255), -1)
+                    put_readable_text(display_frame, f"[LOCKED] {target_eng_label}", (pt1[0], max(pt1[1] - 8, 15)), 
+                                      text_color=(0, 100, 255), outline_color=(255, 255, 255), font_scale=0.55, thickness=2)
 
                 if hand_result is not None:
                     draw_hand(cv2, display_frame, tracker, hand_result)
