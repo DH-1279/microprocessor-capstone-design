@@ -151,10 +151,9 @@ def main():
     state = "WAIT_WAKE"
     target_eng_label = None
     
-    # 위치 고정 및 타임아웃 관리를 위한 변수들
     locked_target_box = None     
     locked_center = None         
-    missing_frame_count = 0      # 물체가 보이지 않은 누적 프레임 카운트
+    missing_frame_count = 0      
 
     fingertip_indices = (4, 8, 12, 16, 20)
     tip_names = ("엄지", "검지", "중지", "약지", "새끼")
@@ -190,7 +189,6 @@ def main():
                     command_text = command_queue.get_nowait()
                     print(f"\n🗣️ [음성 인식]: {command_text}")
 
-                # 상태별 로직 처리
                 if state == "WAIT_WAKE":
                     if command_text and "캡스톤" in command_text:
                         print("👉 시동어 '캡스톤' 감지됨!")
@@ -224,19 +222,16 @@ def main():
                     hand_near_target = False
 
                     if found_target:
-                        # 물체가 화면에 감지되면 실시간 좌표 갱신 및 카운트 초기화
                         locked_target_box = found_target.box
                         x1, y1, x2, y2 = locked_target_box
                         locked_center = (int(((x1 + x2) / 2) * width), int(((y1 + y2) / 2) * height))
                         missing_frame_count = 0
                     else:
-                        # 물체가 안 보이면 누적 프레임 증가
                         missing_frame_count += 1
 
                     if locked_center is not None:
                         center_x, center_y = locked_center
 
-                        # 손이 물체 근처(50px 이내)에 있는지 확인
                         if landmarks is not None:
                             for idx in fingertip_indices:
                                 tip_x = int(landmarks[idx].x * width)
@@ -245,7 +240,6 @@ def main():
                                     hand_near_target = True
                                     break
 
-                        # [안전장치 1] 손이 멀리 있는데 물체가 3초 이상(15fps 기준 45프레임) 안 보이면 타겟 해제
                         if found_target is None and not hand_near_target and missing_frame_count > 45:
                             print(f"⚠️ {target_kor}을(를) 장시간 찾을 수 없어 타겟을 해제합니다.")
                             audio_service.say("물건을 찾을 수 없습니다. 다시 말씀해 주세요.")
@@ -256,7 +250,6 @@ def main():
                             missing_frame_count = 0
                             continue
 
-                        # [안전장치 2] 손이 물체 근처에 닿은 상태에서 물체가 사라지면 획득 성공으로 간주
                         if found_target is None and hand_near_target:
                             print(f"✨ [획득 성공!] {target_kor}을(를) 집어 들었습니다!")
                             audio_service.say(f"{target_kor}을(를) 찾았습니다.")
@@ -336,6 +329,7 @@ def main():
                     put_readable_text(display_frame, f"[LOCKED] {target_eng_label}", (pt1[0], max(pt1[1] - 8, 15)), 
                                       text_color=(0, 100, 255), outline_color=(255, 255, 255), font_scale=0.55, thickness=2)
 
+                # [복원 완료] 손 뼈대 및 랜드마크 시각화 함수 추가
                 if hand_result is not None:
                     draw_hand(cv2, display_frame, tracker, hand_result)
 
