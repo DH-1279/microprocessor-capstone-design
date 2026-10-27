@@ -4,6 +4,7 @@ import cv2
 import math
 import queue
 import time
+import traceback
 from pathlib import Path
 
 # PortAudio(sounddevice)가 hw 대신 plughw를 사용하도록 강제
@@ -21,7 +22,30 @@ from audio import AudioService
 import speech  # 문법 및 자모 편집 거리 기반 음성 파서
 
 # ==========================================
-# [긴급 패치] 신뢰도 및 박스 좌표 오차 우회
+# [긴급 패치 1] HailoRT physical.identify().device_architecture 우회
+# ==========================================
+class _DummyHailoIdentity:
+    device_architecture = "HAILO8"
+    board_name = "Hailo-8"
+    serial_number = "0000"
+
+    def __str__(self):
+        return self.device_architecture
+
+try:
+    import hailo_platform
+    for _mod in (hailo_platform, getattr(hailo_platform, "pyhailort", None), getattr(hailo_platform, "_pyhailort", None)):
+        if _mod is None:
+            continue
+        for _cls_name in ("Device", "VDevice", "PhysicalDevice"):
+            _cls = getattr(_mod, _cls_name, None)
+            if _cls is not None and not hasattr(_cls, "identify"):
+                setattr(_cls, "identify", lambda self, *a, **kw: _DummyHailoIdentity())
+except Exception:
+    pass
+
+# ==========================================
+# [긴급 패치 2] 신뢰도 및 박스 좌표 오차 우회
 # ==========================================
 def patched_decode_hailo_nms(raw, labels, geometry, threshold=0.5, max_objects=20):
     found = []
@@ -74,7 +98,6 @@ TARGET_MAPPING = {
     "Wallet": {"name": "지갑", "aliases": ["지갑", "카드지갑"]}
 }
 
-# 시동어 후보군
 WAKE_WORDS = ("캡스톤", "갭스톤", "캡손", "캐스톤", "캡스", "캡스턴")
 WAKE_THRESHOLD = 0.35
 
@@ -156,7 +179,9 @@ def main():
         "enabled": True,
         "whisper_executable": "/home/dh1279/Desktop/kimGA_raspi/whisper.cpp/build/bin/whisper-cli",
         "whisper_model": "/home/dh1279/Desktop/kimGA_raspi/microprocessor-capstone-design/03. 김가네 캡스톤 디자인/Raspi5_vision/models/ggml-tiny.bin",
+        "tts_executable": "/usr/bin/espeak-ng",
         "playback_executable": "/usr/bin/aplay",
+        "tts_voice": "M1",  # Supertonic 보이스 스타일 (M1, F1 등)
         "cache_dir": "~/.cache/kimgane-haptic/tts",
         "output_device": "plughw:3,0",
         "input_device": 1 
@@ -190,11 +215,6 @@ def main():
             cv2.moveWindow(window_name, 50, 50)
             
             while True:
-                # [추가] 오디오 서비스 내부 에러 실시간 체크 및 출력
-                audio_err = audio_service.get_error()
-                if audio_err:
-                    print(f"🚨 [오디오 에러 감지]: {audio_err}")
-
                 read_result = cam.read()
                 if read_result is None:
                     print("프레임을 읽어올 수 없습니다.")
@@ -216,14 +236,12 @@ def main():
                     command_text = command_queue.get_nowait()
                     print(f"\n🗣️ [음성 인식]: {command_text}")
 
-                # 1. 시동어 대기 상태 (WAIT_WAKE)
                 if state == "WAIT_WAKE":
                     if command_text and check_wake_word(command_text):
                         print("👉 시동어 '캡스톤' 감지됨!")
                         state = "WAIT_TARGET"
                         audio_service.say("찾을 물건을 말해주세요.")
 
-                # 2. 목표 물건 선택 상태 (WAIT_TARGET)
                 elif state == "WAIT_TARGET":
                     if command_text:
                         intent = speech.parse_input(command_text, TARGET_MAPPING, state="scanning")
@@ -267,7 +285,6 @@ def main():
                             if refusal_msg:
                                 audio_service.say(refusal_msg)
 
-                # 3. 타겟 탐색 및 손 추적 상태 (SEARCHING)
                 elif state == "SEARCHING":
                     if command_text:
                         intent = speech.parse_input(command_text, TARGET_MAPPING, state="guiding")
@@ -439,6 +456,7 @@ def main():
         print("\n프로그램을 안전하게 종료합니다.")
     except Exception as e:
         print(f"실행 중 에러가 발생했습니다: {e}")
+        traceback.print_exc()
     finally:
         audio_service.close()
         cv2.destroyAllWindows()
