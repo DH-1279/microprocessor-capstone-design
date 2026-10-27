@@ -18,7 +18,7 @@ from haptic_mvp.vision import HailoDetector, CameraSource
 from haptic_mvp.models import Detection
 from hand_tracker import HandTracker, draw_hand
 from audio import AudioService
-import speech  # [추가] 문법 및 자모 편집 거리 기반 음성 파서
+import speech  # 문법 및 자모 편집 거리 기반 음성 파서
 
 # ==========================================
 # [긴급 패치] 신뢰도 및 박스 좌표 오차 우회
@@ -74,14 +74,13 @@ TARGET_MAPPING = {
     "Wallet": {"name": "지갑", "aliases": ["지갑", "카드지갑"]}
 }
 
-# 시동어 후보군 (tiny 모델의 발음 뭉개짐 대비)
+# 시동어 후보군
 WAKE_WORDS = ("캡스톤", "갭스톤", "캡손", "캐스톤", "캡스", "캡스턴")
 WAKE_THRESHOLD = 0.35
 
-# [추가] 타겟 추적 및 획득 판정 관련 파라미터
-REACH_THRESHOLD = 50.0        # 손 중심(9번)과 물건 중심이 만났다고 판단할 거리(px)
-REQUIRED_REACH_FRAMES = 5     # 오판 방지를 위해 중심 만남이 유지되어야 하는 최소 연속 프레임 수
-MAX_JUMP_DIST = 150.0         # 같은 종류의 다른 물체로 타겟이 튀는 것을 막기 위한 최대 허용 이동 거리(px)
+REACH_THRESHOLD = 50.0        
+REQUIRED_REACH_FRAMES = 5     
+MAX_JUMP_DIST = 150.0         
 
 def get_korean_name(label: str) -> str:
     if label in TARGET_MAPPING:
@@ -89,7 +88,6 @@ def get_korean_name(label: str) -> str:
     return label
 
 def check_wake_word(text: str) -> bool:
-    """speech.py의 자모 거리 계산 및 조사 제거를 활용해 시동어('캡스톤') 감지"""
     if not text:
         return False
     cleaned = text.strip()
@@ -103,7 +101,6 @@ def check_wake_word(text: str) -> bool:
             if speech.word_distance(bare, wake) <= WAKE_THRESHOLD:
                 return True
                 
-    # 띄어쓰기가 잘못된 짧은 발화(예: "캡 스톤") 결합 후 재확인
     joined = "".join(words)
     if len(joined) <= 6:
         bare_joined = speech.strip_particle(joined)
@@ -159,7 +156,6 @@ def main():
         "enabled": True,
         "whisper_executable": "/home/dh1279/Desktop/kimGA_raspi/whisper.cpp/build/bin/whisper-cli",
         "whisper_model": "/home/dh1279/Desktop/kimGA_raspi/microprocessor-capstone-design/03. 김가네 캡스톤 디자인/Raspi5_vision/models/ggml-tiny.bin",
-        "tts_executable": "/usr/bin/espeak-ng",
         "playback_executable": "/usr/bin/aplay",
         "cache_dir": "~/.cache/kimgane-haptic/tts",
         "output_device": "plughw:3,0",
@@ -179,7 +175,7 @@ def main():
     locked_target_box = None     
     locked_center = None         
     missing_frame_count = 0      
-    reach_frame_count = 0        # [추가] 손 중심과 물건 중심이 연속으로 만난 프레임 수
+    reach_frame_count = 0        
 
     fingertip_indices = (4, 8, 12, 16, 20)
     tip_names = ("엄지", "검지", "중지", "약지", "새끼")
@@ -194,6 +190,11 @@ def main():
             cv2.moveWindow(window_name, 50, 50)
             
             while True:
+                # [추가] 오디오 서비스 내부 에러 실시간 체크 및 출력
+                audio_err = audio_service.get_error()
+                if audio_err:
+                    print(f"🚨 [오디오 에러 감지]: {audio_err}")
+
                 read_result = cam.read()
                 if read_result is None:
                     print("프레임을 읽어올 수 없습니다.")
@@ -215,21 +216,16 @@ def main():
                     command_text = command_queue.get_nowait()
                     print(f"\n🗣️ [음성 인식]: {command_text}")
 
-                # ====================================================
                 # 1. 시동어 대기 상태 (WAIT_WAKE)
-                # ====================================================
                 if state == "WAIT_WAKE":
                     if command_text and check_wake_word(command_text):
                         print("👉 시동어 '캡스톤' 감지됨!")
                         state = "WAIT_TARGET"
                         audio_service.say("찾을 물건을 말해주세요.")
 
-                # ====================================================
-                # 2. 목표 물건 선택 상태 (WAIT_TARGET) - speech.py 연동
-                # ====================================================
+                # 2. 목표 물건 선택 상태 (WAIT_TARGET)
                 elif state == "WAIT_TARGET":
                     if command_text:
-                        # speech.py의 'scanning' 상태는 ("target", "list", "stop")을 허용함
                         intent = speech.parse_input(command_text, TARGET_MAPPING, state="scanning")
                         print(f"🔍 [파싱 결과] kind={intent.kind}, name={intent.name}, reason={intent.reason}, detail={intent.detail}")
 
@@ -240,7 +236,6 @@ def main():
                                 state = "SEARCHING"
                                 target_kor = get_korean_name(matched)
                                 
-                                # 최초 선택 시 가장 신뢰도 높은 물체를 기준점으로 고정
                                 found_target = next((det for det in obj_detections if det.label == target_eng_label), None)
                                 if found_target:
                                     locked_target_box = found_target.box
@@ -268,16 +263,12 @@ def main():
                                 state = "WAIT_WAKE"
                                 audio_service.say("취소되었습니다. 다시 부르시려면 캡스톤이라고 말씀해주세요.")
                         else:
-                            # speech.py에 정의된 거절 사유별 안내 음성 출력
                             refusal_msg = speech.refusal_speech(intent)
                             if refusal_msg:
                                 audio_service.say(refusal_msg)
 
-                # ====================================================
                 # 3. 타겟 탐색 및 손 추적 상태 (SEARCHING)
-                # ====================================================
                 elif state == "SEARCHING":
-                    # 탐색 중 음성 명령 처리 ("정지", "목록", "다시")
                     if command_text:
                         intent = speech.parse_input(command_text, TARGET_MAPPING, state="guiding")
                         if intent.kind == "control":
@@ -299,7 +290,6 @@ def main():
                             elif intent.name == "repeat" and target_eng_label:
                                 audio_service.say(f"현재 {get_korean_name(target_eng_label)}을 찾고 있습니다.")
 
-                    # [수정 1] 동종 물체 간 타겟 튐(Switching) 방지: 이전 locked_center와 가장 가까운 객체 매칭
                     candidates = [det for det in obj_detections if det.label == target_eng_label] if obj_detections else []
                     found_target = None
 
@@ -314,7 +304,6 @@ def main():
                                 return math.hypot(locked_center[0] - cx, locked_center[1] - cy)
 
                             closest_det = min(candidates, key=dist_from_locked)
-                            # 기존 위치에서 MAX_JUMP_DIST(150px) 이내일 때만 동일 물체로 인정
                             if dist_from_locked(closest_det) < MAX_JUMP_DIST:
                                 found_target = closest_det
 
@@ -333,14 +322,12 @@ def main():
                     if locked_center is not None:
                         center_x, center_y = locked_center
 
-                        # [수정 2] 손의 중심(9번 랜드마크: 중지 뿌리 관절)과 물건 중심의 거리 계산
                         if landmarks is not None:
                             hand_cx = int(landmarks[9].x * width)
                             hand_cy = int(landmarks[9].y * height)
                             if math.hypot(center_x - hand_cx, center_y - hand_cy) < REACH_THRESHOLD:
                                 hand_near_target = True
 
-                        # [수정 3] 연속 프레임 카운터로 1프레임 스침/오판 방지
                         if hand_near_target:
                             reach_frame_count += 1
                         else:
@@ -399,7 +386,6 @@ def main():
                     else:
                         print(f"⚠️ {target_kor}의 위치를 찾을 수 없습니다.")
 
-                # 화면 시각화 (인식된 물체들 + 좌측 하단 좌표 리스트)
                 if obj_detections:
                     base_y = height - 20
                     line_height = 25
@@ -412,7 +398,6 @@ def main():
                         pt2 = (int(x2 * width), int(y2 * height))
 
                         kor_name = get_korean_name(det.label)
-                        # 현재 추적 중인 타겟 객체만 노란색 박스로 강조
                         is_target = (state == "SEARCHING" and det is found_target)
                         box_color = (0, 255, 255) if is_target else (0, 255, 0)
 
@@ -426,7 +411,6 @@ def main():
                         put_readable_text(display_frame, coord_info, (15, list_y), font_scale=0.6, 
                                           text_color=(20, 20, 20), outline_color=(255, 255, 255), thickness=2)
 
-                # 손에 가려져 실시간 감지는 안 되지만 고정된 타겟이 있을 때 주황색 박스 표시
                 if state == "SEARCHING" and locked_target_box is not None and found_target is None:
                     x1, y1, x2, y2 = locked_target_box
                     pt1 = (int(x1 * width), int(y1 * height))
@@ -438,11 +422,9 @@ def main():
                     put_readable_text(display_frame, f"[LOCKED] {target_eng_label}", (pt1[0], max(pt1[1] - 8, 15)), 
                                       text_color=(0, 100, 255), outline_color=(255, 255, 255), font_scale=0.55, thickness=2)
 
-                # 손 뼈대 및 랜드마크 시각화 함수
                 if hand_result is not None:
                     draw_hand(cv2, display_frame, tracker, hand_result)
 
-                # 상단 상태 표시줄
                 list_str = ", ".join(current_detected_labels) if current_detected_labels else "None"
                 status_msg = f"State: {state} | Detected: [{list_str}]"
                 put_readable_text(display_frame, status_msg, (10, 30), font_scale=0.65, 
