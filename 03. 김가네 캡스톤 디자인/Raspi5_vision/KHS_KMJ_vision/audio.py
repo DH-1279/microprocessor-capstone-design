@@ -1,482 +1,439 @@
-"""Local Korean voice input/output. Importing this module requires only stdlib.
-
-Hardware audio is lazy-loaded by start(). All inference/playback is performed in
-workers, so callers must hand on_text to a thread-safe command queue. This is
-half-duplex audio: speech input is discarded during TTS and its echo cooldown.
-"""
-
-from __future__ import annotations
-
-from array import array
-from collections import deque
-import hashlib
-import importlib
-import math
-from pathlib import Path
-import queue
-import shutil
-import subprocess
 import sys
-import tempfile
-import threading
+import os
+import cv2
+import math
+import queue
 import time
-from typing import Any, Callable
-import wave
+from pathlib import Path
 
+# PortAudio(sounddevice)가 hw 대신 plughw를 사용하도록 강제
+os.environ["PA_ALSA_PLUGHW"] = "1"
 
-DEFAULTS = {
-    "enabled": False,
-    "whisper_executable": "whisper-cli",
-    "whisper_model": "",
-    "whisper_threads": 2,
-    "stt_timeout_s": 30.0,
-    # [수정] espeak-ng 대신 supertonic을 사용하도록 기본값 변경 (필요시 python3 및 모듈 경로 지정)
-    "tts_executable": "python3",
-    "playback_executable": "aplay",
-    "tts_voice": "ko",
-    "tts_rate": 155,
-    "tts_timeout_s": 20.0,
-    "cache_dir": "~/.cache/kimgane-haptic/tts",
-    "input_device": None,
-    "output_device": None,
-    "sample_rate": 16000,
-    "block_ms": 20,
-    "rms_threshold": 0.015,
-    "min_speech_ms": 200,
-    "silence_ms": 650,
-    "max_utterance_ms": 5000,
-    "pre_roll_ms": 200,
-    "echo_cooldown_ms": 300,
+# 1. 모듈 임포트를 위한 최상위 경로 추가
+PROJECT_ROOT = "/home/dh1279/Desktop/kimGA_raspi/microprocessor-capstone-design/03. 김가네 캡스톤 디자인/Raspi5_vision"
+sys.path.append(PROJECT_ROOT)
+
+import haptic_mvp.vision
+from haptic_mvp.vision import HailoDetector, CameraSource
+from haptic_mvp.models import Detection
+from hand_tracker import HandTracker, draw_hand
+from audio import AudioService
+import speech  # 문법 및 자모 편집 거리 기반 음성 파서
+
+# ==========================================
+# [긴급 패치] 신뢰도 및 박스 좌표 오차 우회
+# ==========================================
+def patched_decode_hailo_nms(raw, labels, geometry, threshold=0.5, max_objects=20):
+    found = []
+    for label, rows in zip(labels, raw):
+        for row in rows:
+            if len(row) != 5:
+                continue
+            
+            score = float(row[4])
+            if not math.isfinite(score):
+                continue
+            score = max(0.0, min(1.0, score)) 
+            if score < threshold:
+                continue
+            
+            ymin = max(0.0, min(1.0, float(row[0])))
+            xmin = max(0.0, min(1.0, float(row[1])))
+            ymax = max(0.0, min(1.0, float(row[2])))
+            xmax = max(0.0, min(1.0, float(row[3])))
+            
+            if xmin >= xmax or ymin >= ymax:
+                continue
+
+            box = haptic_mvp.vision.restore_box((ymin, xmin, ymax, xmax), geometry)
+            if box is not None:
+                found.append(Detection(label=label, box=box, score=score))
+                
+    return tuple(sorted(found, key=lambda item: item.score, reverse=True)[:max_objects])
+
+haptic_mvp.vision.decode_hailo_nms = patched_decode_hailo_nms
+# ==========================================
+
+# 2. 파일 경로 및 한글 라벨 매핑 설정
+BASE_DIR = Path(__file__).resolve().parent
+HEF_PATH = str(BASE_DIR / "models" / "best.hef")
+LABELS_PATH = str(BASE_DIR / "config" / "labels.txt")
+HAND_MODEL_PATH = str(Path(PROJECT_ROOT) / "models" / "hand_landmarker.task")
+
+TARGET_MAPPING = {
+    "Earbud": {"name": "이어폰", "aliases": ["이어폰", "무선이어폰", "이어버드"]},
+    "bottle": {"name": "물병", "aliases": ["물병", "병", "페트병"]},
+    "cell phone": {"name": "휴대폰", "aliases": ["휴대폰", "스마트폰", "핸드폰", "폰"]},
+    "cup": {"name": "컵", "aliases": ["컵", "머그컵", "종이컵"]},
+    "remote": {"name": "리모컨", "aliases": ["리모컨", "리모콘"]},
+    "Glasses": {"name": "안경", "aliases": ["안경", "돋보기"]},
+    "Medicine": {"name": "약통", "aliases": ["약통", "약"]},
+    "key": {"name": "열쇠", "aliases": ["열쇠", "키", "차키"]},
+    "Pen": {"name": "볼펜", "aliases": ["볼펜", "펜", "연필"]},
+    "Tumbler": {"name": "텀블러", "aliases": ["텀블러", "보온병"]},
+    "Wallet": {"name": "지갑", "aliases": ["지갑", "카드지갑"]}
 }
 
+WAKE_WORDS = ("캡스톤", "갭스톤", "캡손", "캐스톤", "캡스", "캡스턴")
+WAKE_THRESHOLD = 0.35
 
-def audio_config(values: dict) -> dict:
-    """Validate timing before opening hardware or allocating audio buffers."""
-    cfg = {**DEFAULTS, **values}
-    if not isinstance(cfg["enabled"], bool):
-        raise ValueError("audio.enabled must be true or false")
-    if cfg["sample_rate"] != 16000:
-        raise ValueError("audio.sample_rate must be 16000 for whisper-cli")
-    bounds = {
-        "block_ms": (10, 100), "rms_threshold": (0.0001, 0.9),
-        "min_speech_ms": (40, 2000), "silence_ms": (100, 2000),
-        "max_utterance_ms": (500, 15000), "pre_roll_ms": (0, 1000),
-        "echo_cooldown_ms": (0, 2000), "whisper_threads": (1, 4),
-        "stt_timeout_s": (1, 120), "tts_timeout_s": (1, 120),
-        "tts_rate": (80, 300),
-    }
-    for key, (low, high) in bounds.items():
-        value = cfg[key]
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            raise ValueError(f"audio.{key} must be numeric")
-        if not math.isfinite(value) or not low <= value <= high:
-            raise ValueError(f"audio.{key} must be between {low} and {high}")
-    for key in ("block_ms", "whisper_threads", "tts_rate"):
-        if int(cfg[key]) != cfg[key]:
-            raise ValueError(f"audio.{key} must be an integer")
-        cfg[key] = int(cfg[key])
-    if cfg["min_speech_ms"] + cfg["silence_ms"] > cfg["max_utterance_ms"]:
-        raise ValueError("audio max_utterance_ms must allow speech and trailing silence")
-    model_name = Path(cfg["whisper_model"]).name.lower()
-    if ".en." in model_name or ".en-" in model_name or model_name.endswith(".en"):
-        raise ValueError("Korean STT requires a multilingual model, not an .en model")
-    return cfg
+REACH_THRESHOLD = 50.0        
+REQUIRED_REACH_FRAMES = 5     
+MAX_JUMP_DIST = 150.0         
 
+def get_korean_name(label: str) -> str:
+    if label in TARGET_MAPPING:
+        return TARGET_MAPPING[label]["name"]
+    return label
 
-def pcm16_rms(pcm: bytes) -> float:
-    """RMS in [0, 1] for mono little-endian signed PCM16, without audioop/numpy."""
-    if len(pcm) % 2:
-        raise ValueError("PCM16 data must have an even byte count")
-    if not pcm:
-        return 0.0
-    samples = array("h")
-    samples.frombytes(pcm)
-    if sys.byteorder != "little":
-        samples.byteswap()
-    return math.sqrt(sum(int(x) * int(x) for x in samples) / len(samples)) / 32768
-
-
-class UtteranceDetector:
-    """Simple energy VAD. Bounds utterances; requires voiced duration, not noise gaps."""
-
-    def __init__(self, config: dict):
-        self.config = audio_config(config)
-        self.reset()
-
-    def reset(self) -> None:
-        self.active = False
-        self._pre: deque[bytes] = deque()
-        self._pre_samples = 0
-        self._parts: list[bytes] = []
-        self._samples = 0
-        self._voiced = 0
-        self._silence = 0
-
-    def feed(self, pcm: bytes, *, muted: bool = False) -> bytes | None:
-        if muted:
-            self.reset()
-            return None
-        rms = pcm16_rms(pcm)
-        samples = len(pcm) // 2
-        if not samples:
-            return None
-        cfg = self.config
-        loud = rms >= cfg["rms_threshold"]
-        per_ms = cfg["sample_rate"] / 1000
-        if not self.active:
-            if not loud:
-                self._pre.append(pcm)
-                self._pre_samples += samples
-                limit = int(cfg["pre_roll_ms"] * per_ms)
-                while self._pre and self._pre_samples > limit:
-                    self._pre_samples -= len(self._pre.popleft()) // 2
-                return None
-            self.active = True
-            self._parts = list(self._pre)
-            self._samples = self._pre_samples
-            self._pre.clear()
-            self._pre_samples = 0
-        self._parts.append(pcm)
-        self._samples += samples
-        self._voiced += samples if loud else 0
-        self._silence = 0 if loud else self._silence + samples
-        max_samples = int(cfg["max_utterance_ms"] * per_ms)
-        finished = (self._silence >= cfg["silence_ms"] * per_ms
-                    or self._samples >= max_samples)
-        if not finished:
-            return None
-        result = None
-        if self._voiced >= cfg["min_speech_ms"] * per_ms:
-            result = b"".join(self._parts)[:max_samples * 2]
-        self.reset()
-        return result
-
-
-def build_whisper_command(config: dict, wav_path: Path, output_base: Path) -> list[str]:
-    cfg = audio_config(config)
-    return [str(Path(cfg["whisper_executable"]).expanduser()),
-            "-m", str(Path(cfg["whisper_model"]).expanduser()),
-            "-l", "ko", "-t", str(cfg["whisper_threads"]),
-            "-f", str(wav_path), "-otxt", "-of", str(output_base), "-nt", "-np"]
-
-
-def tts_cache_path(config: dict, text: str) -> Path:
-    # [수정] 캐시 키에 supertonic 식별자 반영
-    key = f"supertonic\0{config['tts_voice']}\0{text}"
-    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
-    return Path(config["cache_dir"]).expanduser() / f"{digest}.wav"
-
-
-class _Cancelled(Exception):
-    pass
-
-
-class AudioService:
-    """Two bounded workers for capture/STT and TTS, with explicit error reporting."""
-
-    def __init__(self, config: dict, on_text: Callable[[str], None]):
-        self.config = audio_config(config)
-        self.on_text = on_text
-        self._stop = threading.Event()
-        self._lock = threading.Lock()
-        self._pcm: queue.Queue[tuple[float, bytes]] = queue.Queue(maxsize=25)
-        self._speech: queue.Queue[str] = queue.Queue(maxsize=1)
-        self._errors: queue.Queue[str] = queue.Queue(maxsize=8)
-        self._threads: list[threading.Thread] = []
-        self._processes: set[subprocess.Popen] = set()
-        self._stream: Any = None
-        self._started = False
-        self._speaking = False
-        self._listening = False
-        self._transcribing = False
-        self._input_generation = 0
-        self._mute_until = 0.0
-        self._vad = UtteranceDetector(self.config)
-
-    @property
-    def speaking(self) -> bool:
-        with self._lock:
-            return self._speaking
-
-    @property
-    def listening(self) -> bool:
-        with self._lock:
-            return self._listening or self._transcribing
-
-    def get_error(self) -> str | None:
-        try:
-            return self._errors.get_nowait()
-        except queue.Empty:
-            return None
-
-    def discard_input(self) -> None:
-        with self._lock:
-            self._input_generation += 1
-            self._mute_until = max(self._mute_until, time.monotonic())
-            self._vad.reset()
-            self._listening = False
-            while True:
-                try:
-                    self._pcm.get_nowait()
-                except queue.Empty:
-                    break
-
-    def _report(self, message: str) -> None:
-        try:
-            self._errors.put_nowait(message)
-        except queue.Full:
-            try:
-                self._errors.get_nowait()
-            except queue.Empty:
-                pass
-            try:
-                self._errors.put_nowait(message)
-            except queue.Full:
-                pass
-
-    def start(self) -> None:
-        if self._started:
-            return
-        if self._stop.is_set():
-            raise RuntimeError("AudioService has been closed; create a new instance")
-        if not self.config["enabled"]:
-            return
-        for key in ("whisper_executable", "playback_executable"):
-            binary = str(Path(self.config[key]).expanduser())
-            resolved = shutil.which(binary)
-            if resolved is None:
-                raise RuntimeError(f"Audio executable missing: {key}={binary}")
-            self.config[key] = resolved
-        model = Path(self.config["whisper_model"]).expanduser()
-        if not model.is_file() or model.stat().st_size == 0:
-            raise RuntimeError(f"Whisper multilingual model missing or empty: {model}")
-        self.config["whisper_model"] = str(model.resolve())
-        Path(self.config["cache_dir"]).expanduser().mkdir(parents=True, exist_ok=True)
-        try:
-            sd = importlib.import_module("sounddevice")
-        except ImportError as exc:
-            raise RuntimeError("Install sounddevice and the system libportaudio2 package") from exc
-        try:
-            self._stream = sd.RawInputStream(
-                samplerate=self.config["sample_rate"], channels=1, dtype="int16",
-                blocksize=self.config["sample_rate"] * self.config["block_ms"] // 1000,
-                device=self.config["input_device"], callback=self._capture,
-                finished_callback=self._input_finished,
-            )
-            self._stream.start()
-            self._started = True
-            for name, target in (("audio-stt", self._listen_worker), ("audio-tts", self._speak_worker)):
-                worker = threading.Thread(target=target, name=name, daemon=True)
-                self._threads.append(worker)
-                worker.start()
-        except Exception:
-            self.close()
-            raise
-
-    def say(self, text: str) -> bool:
-        text = text.strip()
-        if not self._started or self._stop.is_set() or not text:
-            return False
-        if len(text) > 300:
-            raise ValueError("Announcement exceeds the 300-character limit")
-        with self._lock:
-            if self._speaking or self._listening or self._transcribing:
-                return False
-            self._speaking = True
-            try:
-                self._speech.put_nowait(text)
-            except queue.Full:
-                self._speaking = False
-                return False
+def check_wake_word(text: str) -> bool:
+    if not text:
+        return False
+    cleaned = text.strip()
+    if "캡스톤" in cleaned:
         return True
-
-    def _muted(self, timestamp: float) -> bool:
-        return self._speaking or self._transcribing or timestamp < self._mute_until
-
-    def _capture(self, indata, frames, timing, status) -> None:
-        if self._stop.is_set():
-            return
-        if status:
-            self._report(f"Microphone stream: {status}")
-        now = time.monotonic()
-        with self._lock:
-            if self._muted(now):
-                return
-        try:
-            self._pcm.put_nowait((now, bytes(indata)))
-        except queue.Full:
-            self._report("Microphone queue overflow; stale audio will be discarded")
-
-    def _input_finished(self) -> None:
-        if not self._stop.is_set():
-            self._report("Microphone stream stopped unexpectedly; check the USB device")
-            self._stop.set()
-
-    def _listen_worker(self) -> None:
-        try:
-            while not self._stop.is_set():
-                try:
-                    timestamp, pcm = self._pcm.get(timeout=0.1)
-                except queue.Empty:
-                    continue
-                with self._lock:
-                    muted = self._muted(timestamp) or time.monotonic() - timestamp > 0.5
-                    utterance = self._vad.feed(pcm, muted=muted)
-                    self._listening = self._vad.active
-                    if utterance is not None:
-                        self._transcribing = True
-                        generation = self._input_generation
-                if utterance is None:
-                    continue
-                try:
-                    with tempfile.TemporaryDirectory(prefix="kimgane-stt-") as directory:
-                        wav_path = Path(directory) / "utterance.wav"
-                        with wave.open(str(wav_path), "wb") as output:
-                            output.setnchannels(1)
-                            output.setsampwidth(2)
-                            output.setframerate(16000)
-                            output.writeframes(utterance)
-                        text = self.transcribe_wav(wav_path)
-                    with self._lock:
-                        if (text and not self._stop.is_set()
-                                and generation == self._input_generation):
-                            self.on_text(text)
-                finally:
-                    with self._lock:
-                        self._transcribing = False
-                        self._listening = False
-                        self._vad.reset()
-                        self._mute_until = max(self._mute_until, time.monotonic())
-        except _Cancelled:
-            pass
-        except Exception as exc:
-            self._report(f"Audio input/STT failed: {exc}")
-            self._stop.set()
-
-    def transcribe_wav(self, wav_path: str | Path) -> str:
-        wav_path = Path(wav_path).expanduser().resolve()
-        with wave.open(str(wav_path), "rb") as source:
-            if (source.getnchannels(), source.getsampwidth(), source.getframerate()) != (1, 2, 16000):
-                raise ValueError("STT WAV must be mono, 16-bit PCM, 16000 Hz")
-            if not 0 < source.getnframes() <= 15 * 16000:
-                raise ValueError("STT WAV must contain between 0 and 15 seconds of audio")
-        with tempfile.TemporaryDirectory(prefix="kimgane-transcript-") as directory:
-            output_base = Path(directory) / "transcript"
-            command = build_whisper_command(self.config, wav_path, output_base)
-            self._run(command, self.config["stt_timeout_s"])
-            transcript = output_base.with_suffix(".txt")
-            if not transcript.is_file():
-                raise RuntimeError("whisper-cli completed without its expected transcript file")
-            text = transcript.read_text(encoding="utf-8-sig").strip()
-            return " ".join(text.split())
-
-    def _speak_worker(self) -> None:
-        try:
-            while not self._stop.is_set():
-                try:
-                    text = self._speech.get(timeout=0.1)
-                except queue.Empty:
-                    continue
-                try:
-                    self._play(text)
-                finally:
-                    with self._lock:
-                        self._speaking = False
-                        self._mute_until = time.monotonic() + self.config["echo_cooldown_ms"] / 1000
-        except _Cancelled:
-            pass
-        except Exception as exc:
-            self._report(f"Audio output/TTS failed: {exc}")
-            self._stop.set()
-
-    def _play(self, text: str) -> None:
-        cfg = self.config
-        target = tts_cache_path(cfg, text)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        if not target.is_file():
-            with tempfile.TemporaryDirectory(prefix="tts-", dir=target.parent) as directory:
-                temporary = Path(directory) / "speech.wav"
+    
+    words = cleaned.split()
+    for word in words:
+        bare = speech.strip_particle(word)
+        for wake in WAKE_WORDS:
+            if speech.word_distance(bare, wake) <= WAKE_THRESHOLD:
+                return True
                 
-                # [수정] Supertonic 모델을 호출하여 WAV를 생성하는 명령어 구성
-                # Supertonic 사용법에 맞춰 인자 수정 (예: python3 -m supertonic ...)
-                command = [
-                    cfg["tts_executable"], "-m", "supertonic",
-                    "--text", text,
-                    "--output", str(temporary)
-                ]
-                
-                self._run(command, cfg["tts_timeout_s"])
-                
-                with wave.open(str(temporary), "rb") as wav:
-                    if wav.getnframes() == 0:
-                        raise RuntimeError("Supertonic TTS generated an empty WAV")
-                temporary.replace(target)
-                
-        command = [cfg["playback_executable"], "-q"]
-        if cfg["output_device"] is not None:
-            command.extend(["-D", str(cfg["output_device"])])
-        command.append(str(target))
-        self._run(command, cfg["tts_timeout_s"])
+    joined = "".join(words)
+    if len(joined) <= 6:
+        bare_joined = speech.strip_particle(joined)
+        for wake in WAKE_WORDS:
+            if speech.word_distance(bare_joined, wake) <= WAKE_THRESHOLD:
+                return True
+    return False
 
-    def _run(self, command: list[str], timeout: float, input_text: str | None = None) -> str:
-        with self._lock:
-            if self._stop.is_set():
-                raise _Cancelled()
-            process = subprocess.Popen(command, stdin=subprocess.PIPE if input_text is not None else subprocess.DEVNULL,
-                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                       text=True, encoding="utf-8", errors="replace")
-            self._processes.add(process)
-        deadline = time.monotonic() + timeout
-        try:
-            pending_input = input_text
+def draw_dashed_line(img, pt1, pt2, color=(30, 30, 30), thickness=2, dash_len=8, gap_len=6):
+    dist = math.hypot(pt2[0] - pt1[0], pt2[1] - pt1[1])
+    if dist == 0:
+        return
+    dx = (pt2[0] - pt1[0]) / dist
+    dy = (pt2[1] - pt1[1]) / dist
+
+    curr = 0
+    while curr < dist:
+        start_x = int(pt1[0] + dx * curr)
+        start_y = int(pt1[1] + dy * curr)
+        end_curr = min(curr + dash_len, dist)
+        end_x = int(pt1[0] + dx * end_curr)
+        end_y = int(pt1[1] + dy * end_curr)
+
+        cv2.line(img, (start_x, start_y), (end_x, end_y), (220, 220, 220), thickness + 2, cv2.LINE_AA)
+        cv2.line(img, (start_x, start_y), (end_x, end_y), color, thickness, cv2.LINE_AA)
+        curr += dash_len + gap_len
+
+def put_readable_text(img, text, pos, font_scale=0.5, text_color=(20, 20, 20), outline_color=(245, 245, 245), thickness=1):
+    cv2.putText(img, text, pos, cv2.FONT_HERSHEY_SIMPLEX, font_scale, outline_color, thickness + 2, cv2.LINE_AA)
+    cv2.putText(img, text, pos, cv2.FONT_HERSHEY_SIMPLEX, font_scale, text_color, thickness, cv2.LINE_AA)
+
+def main():
+    config = {
+        "object_model": HEF_PATH,
+        "labels_file": LABELS_PATH,
+        "score_threshold": 0.2,
+        "max_objects": 20,
+        "infer_timeout_ms": 1500,
+        
+        "hand_model": HAND_MODEL_PATH,
+        "hand": "Any",
+        "worn_hand": "Any",
+        "hand_score_threshold": 0.5,
+        
+        "source": "picamera2", 
+        "width": 1280,
+        "height": 720,
+        "fps": 15,
+        "device": 0
+    }
+
+    audio_config = {
+        "enabled": True,
+        "whisper_executable": "/home/dh1279/Desktop/kimGA_raspi/whisper.cpp/build/bin/whisper-cli",
+        "whisper_model": "/home/dh1279/Desktop/kimGA_raspi/microprocessor-capstone-design/03. 김가네 캡스톤 디자인/Raspi5_vision/models/ggml-tiny.bin",
+        "tts_executable": "python3",  # Supertonic 실행 환경
+        "playback_executable": "/usr/bin/aplay",
+        "cache_dir": "~/.cache/kimgane-haptic/tts",
+        "output_device": "plughw:3,0",
+        "input_device": 1 
+    }
+
+    command_queue = queue.Queue()
+    audio_service = AudioService(audio_config, on_text=command_queue.put_nowait)
+    audio_service.start()
+
+    print("초기화 완료. 시동어 '캡스톤'을 기다리는 중...")
+    audio_service.say("시스템이 준비되었습니다. 캡스톤이라고 말씀해주세요.")
+
+    state = "WAIT_WAKE"
+    target_eng_label = None
+    
+    locked_target_box = None     
+    locked_center = None         
+    missing_frame_count = 0      
+    reach_frame_count = 0        
+
+    fingertip_indices = (4, 8, 12, 16, 20)
+    tip_names = ("엄지", "검지", "중지", "약지", "새끼")
+
+    try:
+        with CameraSource(config) as cam, \
+             HailoDetector(config) as detector, \
+             HandTracker(config) as tracker:
+             
+            window_name = "Capstone Vision Controller"
+            cv2.namedWindow(window_name)
+            cv2.moveWindow(window_name, 50, 50)
+            
             while True:
-                if self._stop.is_set():
-                    raise _Cancelled()
-                if time.monotonic() >= deadline:
-                    raise TimeoutError(f"{Path(command[0]).name} exceeded {timeout:g}s")
-                try:
-                    stdout, stderr = process.communicate(input=pending_input, timeout=0.1)
+                read_result = cam.read()
+                if read_result is None:
+                    print("프레임을 읽어올 수 없습니다.")
                     break
-                except subprocess.TimeoutExpired:
-                    pending_input = None
-            if self._stop.is_set():
-                raise _Cancelled()
-            if process.returncode:
-                detail = (stderr or stdout).strip()[-1000:]
-                raise RuntimeError(f"{Path(command[0]).name} exited {process.returncode}: {detail}")
-            return stdout
-        finally:
-            if process.poll() is None:
-                process.kill()
-            process.communicate()
-            with self._lock:
-                self._processes.discard(process)
+                    
+                frame, timestamp = read_result
+                
+                obj_detections = detector.detect(frame)
+                hand_result = tracker.detect(frame, timestamp)
 
-    def close(self) -> None:
-        self._stop.set()
-        if self._stream is not None:
-            try:
-                self._stream.abort()
-            except Exception as exc:
-                self._report(f"Microphone stop failed: {exc}")
-            finally:
-                try:
-                    self._stream.close()
-                except Exception as exc:
-                    self._report(f"Microphone close failed: {exc}")
-                self._stream = None
-        with self._lock:
-            for process in self._processes:
-                if process.poll() is None:
-                    try:
-                        process.terminate()
-                    except ProcessLookupError:
-                        pass
-        for worker in self._threads:
-            if worker is not threading.current_thread():
-                worker.join(timeout=2)
-                if worker.is_alive():
-                    self._report(f"Audio worker did not stop: {worker.name}")
-        with self._lock:
-            self._speaking = self._listening = self._transcribing = False
-        self._started = False
+                display_frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+                height, width = display_frame.shape[:2]
+
+                current_detected_labels = {det.label for det in obj_detections} if obj_detections else set()
+                current_korean_list = [get_korean_name(l) for l in current_detected_labels]
+
+                command_text = None
+                if not command_queue.empty():
+                    command_text = command_queue.get_nowait()
+                    print(f"\n🗣️ [음성 인식]: {command_text}")
+
+                if state == "WAIT_WAKE":
+                    if command_text and check_wake_word(command_text):
+                        print("👉 시동어 '캡스톤' 감지됨!")
+                        state = "WAIT_TARGET"
+                        audio_service.say("찾을 물건을 말해주세요.")
+
+                elif state == "WAIT_TARGET":
+                    if command_text:
+                        intent = speech.parse_input(command_text, TARGET_MAPPING, state="scanning")
+                        print(f"🔍 [파싱 결과] kind={intent.kind}, name={intent.name}, reason={intent.reason}, detail={intent.detail}")
+
+                        if intent.kind == "target" and intent.name:
+                            matched = intent.name
+                            if matched in current_detected_labels:
+                                target_eng_label = matched
+                                state = "SEARCHING"
+                                target_kor = get_korean_name(matched)
+                                
+                                found_target = next((det for det in obj_detections if det.label == target_eng_label), None)
+                                if found_target:
+                                    locked_target_box = found_target.box
+                                    x1, y1, x2, y2 = locked_target_box
+                                    locked_center = (int(((x1 + x2) / 2) * width), int(((y1 + y2) / 2) * height))
+                                missing_frame_count = 0
+                                reach_frame_count = 0
+
+                                print(f"🎯 타겟 설정 완료: {target_kor} (매칭 별칭: {intent.detail})")
+                                audio_service.say(f"{target_kor}을(를) 찾아 안내합니다.")
+                            else:
+                                target_kor = get_korean_name(matched)
+                                print(f"⚠️ 화면에 '{target_kor}' 없음 (현재 감지됨: {current_korean_list})")
+                                audio_service.say(f"현재 화면에 {target_kor}이 없습니다. 다시 말씀해 주세요.")
+
+                        elif intent.kind == "control":
+                            if intent.name == "list":
+                                if current_korean_list:
+                                    items_str = ", ".join(current_korean_list)
+                                    audio_service.say(f"현재 주변에 {items_str}이 있습니다.")
+                                else:
+                                    audio_service.say("현재 인식된 물체가 없습니다.")
+                            elif intent.name == "stop":
+                                print("⏹️ 대기 상태로 복귀합니다.")
+                                state = "WAIT_WAKE"
+                                audio_service.say("취소되었습니다. 다시 부르시려면 캡스톤이라고 말씀해주세요.")
+                        else:
+                            refusal_msg = speech.refusal_speech(intent)
+                            if refusal_msg:
+                                audio_service.say(refusal_msg)
+
+                elif state == "SEARCHING":
+                    if command_text:
+                        intent = speech.parse_input(command_text, TARGET_MAPPING, state="guiding")
+                        if intent.kind == "control":
+                            if intent.name == "stop":
+                                print("⏹️ 사용자 요청으로 안내를 중지합니다.")
+                                audio_service.say("안내를 중지합니다.")
+                                state = "WAIT_WAKE"
+                                target_eng_label = None
+                                locked_target_box = None
+                                locked_center = None
+                                missing_frame_count = 0
+                                reach_frame_count = 0
+                                continue
+                            elif intent.name == "list":
+                                if current_korean_list:
+                                    audio_service.say(f"주변에 {', '.join(current_korean_list)}이 있습니다.")
+                                else:
+                                    audio_service.say("인식된 물체가 없습니다.")
+                            elif intent.name == "repeat" and target_eng_label:
+                                audio_service.say(f"현재 {get_korean_name(target_eng_label)}을 찾고 있습니다.")
+
+                    candidates = [det for det in obj_detections if det.label == target_eng_label] if obj_detections else []
+                    found_target = None
+
+                    if candidates:
+                        if locked_center is None:
+                            found_target = candidates[0]
+                        else:
+                            def dist_from_locked(det):
+                                x1, y1, x2, y2 = det.box
+                                cx = ((x1 + x2) / 2) * width
+                                cy = ((y1 + y2) / 2) * height
+                                return math.hypot(locked_center[0] - cx, locked_center[1] - cy)
+
+                            closest_det = min(candidates, key=dist_from_locked)
+                            if dist_from_locked(closest_det) < MAX_JUMP_DIST:
+                                found_target = closest_det
+
+                    target_kor = get_korean_name(target_eng_label)
+                    landmarks = getattr(tracker, "last_landmarks", None)
+                    hand_near_target = False
+
+                    if found_target:
+                        locked_target_box = found_target.box
+                        x1, y1, x2, y2 = locked_target_box
+                        locked_center = (int(((x1 + x2) / 2) * width), int(((y1 + y2) / 2) * height))
+                        missing_frame_count = 0
+                    else:
+                        missing_frame_count += 1
+
+                    if locked_center is not None:
+                        center_x, center_y = locked_center
+
+                        if landmarks is not None:
+                            hand_cx = int(landmarks[9].x * width)
+                            hand_cy = int(landmarks[9].y * height)
+                            if math.hypot(center_x - hand_cx, center_y - hand_cy) < REACH_THRESHOLD:
+                                hand_near_target = True
+
+                        if hand_near_target:
+                            reach_frame_count += 1
+                        else:
+                            reach_frame_count = 0
+
+                        if reach_frame_count >= REQUIRED_REACH_FRAMES:
+                            print(f"✨ [획득 성공!] {target_kor}을(를) 집어 들었습니다! ({reach_frame_count}프레임 연속 도달)")
+                            audio_service.say(f"{target_kor}을(를) 찾았습니다.")
+                            state = "WAIT_WAKE"
+                            target_eng_label = None
+                            locked_target_box = None
+                            locked_center = None
+                            missing_frame_count = 0
+                            reach_frame_count = 0
+                            continue
+
+                        if found_target is None and not hand_near_target and missing_frame_count > 45:
+                            print(f"⚠️ {target_kor}을(를) 장시간 찾을 수 없어 타겟을 해제합니다.")
+                            audio_service.say("물건을 찾을 수 없습니다. 다시 말씀해 주세요.")
+                            state = "WAIT_TARGET"
+                            target_eng_label = None
+                            locked_target_box = None
+                            locked_center = None
+                            missing_frame_count = 0
+                            reach_frame_count = 0
+                            continue
+
+                        is_occluded = (found_target is None)
+                        status_str = " (⚠️ 손에 가려짐)" if is_occluded else ""
+                        print(f"\n🎯 [탐색 중{status_str}] 목표: {target_kor} | 중심: ({center_x}, {center_y})")
+
+                        if landmarks is not None:
+                            coord_strs = []
+                            dist_strs = []
+                            overlay = display_frame.copy()
+
+                            for idx, name in zip(fingertip_indices, tip_names):
+                                tip_x = int(landmarks[idx].x * width)
+                                tip_y = int(landmarks[idx].y * height)
+                                dist = math.hypot(center_x - tip_x, center_y - tip_y)
+                                
+                                coord_strs.append(f"{name}({tip_x},{tip_y})")
+                                dist_strs.append(f"{name}: {dist:.1f}px")
+
+                                draw_dashed_line(overlay, (tip_x, tip_y), (center_x, center_y), color=(30, 30, 30), thickness=2)
+                                mid_x = int((tip_x + center_x) / 2)
+                                mid_y = int((tip_y + center_y) / 2)
+                                put_readable_text(overlay, f"{dist:.0f}px", (mid_x - 15, mid_y), font_scale=0.45)
+
+                            cv2.addWeighted(overlay, 0.75, display_frame, 0.25, 0, display_frame)
+
+                            print(f"    ├ 📍 손가락 절대 좌표: " + ", ".join(coord_strs))
+                            print(f"    └ 📏 목표와의 거리: " + " / ".join(dist_strs))
+                        else:
+                            print("    └ 🖐️ 손이 감지되지 않았습니다.")
+                    else:
+                        print(f"⚠️ {target_kor}의 위치를 찾을 수 없습니다.")
+
+                if obj_detections:
+                    base_y = height - 20
+                    line_height = 25
+
+                    for i, det in enumerate(obj_detections):
+                        x1, y1, x2, y2 = det.box
+                        cx = int(((x1 + x2) / 2) * width)
+                        cy = int(((y1 + y2) / 2) * height)
+                        pt1 = (int(x1 * width), int(y1 * height))
+                        pt2 = (int(x2 * width), int(y2 * height))
+
+                        kor_name = get_korean_name(det.label)
+                        is_target = (state == "SEARCHING" and det is found_target)
+                        box_color = (0, 255, 255) if is_target else (0, 255, 0)
+
+                        cv2.rectangle(display_frame, pt1, pt2, box_color, 2)
+                        cv2.circle(display_frame, (cx, cy), 5, (0, 0, 255), -1)
+                        cv2.putText(display_frame, f"{det.label}: {det.score:.2f}", (pt1[0], max(pt1[1] - 8, 15)), 
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, box_color, 2)
+
+                        list_y = base_y - (i * line_height)
+                        coord_info = f"{det.label} : ({cx}, {cy})"
+                        put_readable_text(display_frame, coord_info, (15, list_y), font_scale=0.6, 
+                                          text_color=(20, 20, 20), outline_color=(255, 255, 255), thickness=2)
+
+                if state == "SEARCHING" and locked_target_box is not None and found_target is None:
+                    x1, y1, x2, y2 = locked_target_box
+                    pt1 = (int(x1 * width), int(y1 * height))
+                    pt2 = (int(x2 * width), int(y2 * height))
+                    cx, cy = locked_center
+
+                    cv2.rectangle(display_frame, pt1, pt2, (0, 165, 255), 2, cv2.LINE_AA)
+                    cv2.circle(display_frame, (cx, cy), 6, (0, 165, 255), -1)
+                    put_readable_text(display_frame, f"[LOCKED] {target_eng_label}", (pt1[0], max(pt1[1] - 8, 15)), 
+                                      text_color=(0, 100, 255), outline_color=(255, 255, 255), font_scale=0.55, thickness=2)
+
+                if hand_result is not None:
+                    draw_hand(cv2, display_frame, tracker, hand_result)
+
+                list_str = ", ".join(current_detected_labels) if current_detected_labels else "None"
+                status_msg = f"State: {state} | Detected: [{list_str}]"
+                put_readable_text(display_frame, status_msg, (10, 30), font_scale=0.65, 
+                                  text_color=(255, 255, 255), outline_color=(0, 0, 0), thickness=2)
+                
+                cv2.imshow(window_name, display_frame)
+                
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    break
+
+    except KeyboardInterrupt:
+        print("\n프로그램을 안전하게 종료합니다.")
+    except Exception as e:
+        print(f"실행 중 에러가 발생했습니다: {e}")
+    finally:
+        audio_service.close()
+        cv2.destroyAllWindows()
+
+if __name__ == "__main__":
+    main()
