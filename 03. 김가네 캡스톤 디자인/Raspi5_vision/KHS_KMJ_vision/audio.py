@@ -12,6 +12,7 @@ from collections import deque
 import hashlib
 import importlib
 import math
+import os
 from pathlib import Path
 import queue
 import shutil
@@ -22,6 +23,10 @@ import threading
 import time
 from typing import Any, Callable
 import wave
+
+# [핵심 수정] 하이로(Hailo) 장치와의 충돌 및 오탐색 방지를 위해 ONNX Runtime 환경 변수 설정
+os.environ["CUDA_VISIBLE_DEVICES"] = ""
+os.environ["ORT_TENSORRT_UNIFIED_MEMORY_MODE"] = "0"
 
 try:
     from supertonic import TTS
@@ -244,11 +249,10 @@ class AudioService:
             raise RuntimeError("Supertonic package is not installed. Run 'pip install supertonic'.")
         
         try:
-            # [핵심 수정] 라즈베리파이 5에서 장치 식별 에러(identify)를 방지하기 위해 CPU 프로바이더 강제 지정
+            # CPU 전용 프로바이더를 명시하여 외부 하드웨어(Hailo NPU 등) 간섭 방지
             try:
                 self._tts_engine = TTS(auto_download=True, providers=["CPUExecutionProvider"])
             except TypeError:
-                # providers 인자를 지원하지 않는 패키지 버전을 위한 차선책
                 self._tts_engine = TTS(auto_download=True)
         except Exception as exc:
             raise RuntimeError(f"Supertonic initialization failed: {exc}") from exc
