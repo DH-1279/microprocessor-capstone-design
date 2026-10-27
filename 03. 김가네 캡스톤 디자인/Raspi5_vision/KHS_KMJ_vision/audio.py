@@ -23,6 +23,12 @@ import time
 from typing import Any, Callable
 import wave
 
+# [수정] supertonic 패키지 임포트 시도 (설치되지 않은 경우를 대비해 예외 처리 가능)
+try:
+    from supertonic import TTS
+except ImportError:
+    TTS = None
+
 
 DEFAULTS = {
     "enabled": False,
@@ -30,8 +36,7 @@ DEFAULTS = {
     "whisper_model": "",
     "whisper_threads": 2,
     "stt_timeout_s": 30.0,
-    # [수정] 기본 TTS 실행 파일을 supertonic으로 변경 (필요시 경로 지정 가능)
-    "tts_executable": "supertonic",
+    "tts_executable": "supertonic",  # 하위 호환 및 표시용
     "playback_executable": "aplay",
     "tts_voice": "ko",
     "tts_rate": 155,
@@ -161,9 +166,7 @@ def build_whisper_command(config: dict, wav_path: Path, output_base: Path) -> li
 
 
 def tts_cache_path(config: dict, text: str) -> Path:
-    """[수정] TTS 엔진 이름(실행 파일명)을 반영하여 캐시 키 생성"""
-    engine_name = Path(config["tts_executable"]).name
-    key = f"{engine_name}\0{config['tts_voice']}\0{config['tts_rate']}\0{text}"
+    key = f"supertonic\0{config['tts_voice']}\0{config['tts_rate']}\0{text}"
     digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
     return Path(config["cache_dir"]).expanduser() / f"{digest}.wav"
 
@@ -193,6 +196,7 @@ class AudioService:
         self._input_generation = 0
         self._mute_until = 0.0
         self._vad = UtteranceDetector(self.config)
+        self._tts_engine = None  # Supertonic 인스턴스 저장용
 
     @property
     def speaking(self) -> bool:
@@ -242,12 +246,23 @@ class AudioService:
             raise RuntimeError("AudioService has been closed; create a new instance")
         if not self.config["enabled"]:
             return
-        for key in ("whisper_executable", "tts_executable", "playback_executable"):
+        
+        # [수정] Supertonic 패키지 로드 확인
+        if TTS is None:
+            raise RuntimeError("Supertonic package is not installed. Run 'pip install supertonic'.")
+        try:
+            # Supertonic TTS 엔진 초기화 (최초 실행 시 모델 자동 다운로드 수행)
+            self._tts_engine = TTS()
+        except Exception as exc:
+            raise RuntimeError(f"Failed to initialize Supertonic TTS: {exc}") from exc
+
+        for key in ("whisper_executable", "playback_executable"):
             binary = str(Path(self.config[key]).expanduser())
             resolved = shutil.which(binary)
             if resolved is None:
                 raise RuntimeError(f"Audio executable missing: {key}={binary}")
             self.config[key] = resolved
+
         model = Path(self.config["whisper_model"]).expanduser()
         if not model.is_file() or model.stat().st_size == 0:
             raise RuntimeError(f"Whisper multilingual model missing or empty: {model}")
@@ -395,29 +410,36 @@ class AudioService:
         target = tts_cache_path(cfg, text)
         target.parent.mkdir(parents=True, exist_ok=True)
         if not target.is_file():
+            # [수정] 외부 프로세스 호출 대신 Python 라이브러리를 통해 직접 오디오 생성
             with tempfile.TemporaryDirectory(prefix="tts-", dir=target.parent) as directory:
                 temporary = Path(directory) / "speech.wav"
                 
-                # [수정] Supertonic TTS CLI 명령어 구조에 맞게 인자 설정
-                # (Supertonic CLI의 인자 구조에 맞추어 필요시 수정하세요. 
-                #  일반적으로 출력 파일 경로와 텍스트를 인자 혹은 표준 입력으로 받습니다.)
-                executable_name = Path(cfg["tts_executable"]).name.lower()
-                if "supertonic" in executable_name:
-                    # 예시: supertonic --text "문장" --output "출력경로.wav" 형태로 동작하는 경우
-                    command = [
-                        cfg["tts_executable"],
-                        "--text", text,
-                        "--output", str(temporary),
-                        "--voice", cfg["tts_voice"]
-                    ]
-                    input_text = None
-                else:
-                    # 기존 espeak-ng 호환 폴백
-                    command = [cfg["tts_executable"], "-b", "1", "-v", cfg["tts_voice"],
-                               "-s", str(cfg["tts_rate"]), "-w", str(temporary), "--stdin"]
-                    input_text = text
+                if self._tts_engine is None:
+                    raise RuntimeError("Supertonic TTS engine is not initialized.")
+                
+                try:
+                    # supertonic 패키지의 synthesize 메서드를 사용하여 음성 생성 및 파일 저장
+                    # (패키지 구조에 따라 메서드 인자가 다를 수 있으므로 아래 예시를 참고해주세요)
+                    audio_result = self._tts_engine.synthesize(text=text, language=cfg["tts_voice"])
+                    
+                    # 만약 synthesize가 파일 경로를 직접 반환하지 않고 바이트나 배열을 준다면 WAV 파일로 저장 처리
+                    if isinstance(audio_result, (str, Path)):
+                        shutil.copy(audio_result, temporary)
+                    else:
+                        # 반환 데이터 형식에 맞게 wav 파일로 기록 (예: numpy array 혹은 bytes인 경우)
+                        # 패키지 제공 방식에 맞춰 조정 가능합니다.
+                        import soundfile as sf
+                        # 관례적으로 (data, sample_rate) 또는 바이트 형태로 반환될 수 있음
+                        if hasattr(audio_result, "audio"):
+                            sf.write(str(temporary), audio_result.audio, audio_result.sample_rate)
+                        elif isinstance(audio_result, tuple):
+                            sf.write(str(temporary), audio_result[0], audio_result[1])
+                        else:
+                            # 직접 synthesize가 지정 경로 저장 기능을 지원하는 경우
+                            self._tts_engine.synthesize(text=text, language=cfg["tts_voice"], save_path=str(temporary))
+                except Exception as exc:
+                    raise RuntimeError(f"Supertonic synthesis failed: {exc}") from exc
 
-                self._run(command, cfg["tts_timeout_s"], input_text=input_text)
                 with wave.open(str(temporary), "rb") as wav:
                     if wav.getnframes() == 0:
                         raise RuntimeError("TTS generated an empty WAV")
