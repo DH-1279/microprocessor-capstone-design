@@ -23,7 +23,6 @@ import time
 from typing import Any, Callable
 import wave
 
-# [수정] supertonic 패키지 임포트 시도 (설치되지 않은 경우를 대비해 예외 처리 가능)
 try:
     from supertonic import TTS
 except ImportError:
@@ -36,7 +35,7 @@ DEFAULTS = {
     "whisper_model": "",
     "whisper_threads": 2,
     "stt_timeout_s": 30.0,
-    "tts_executable": "supertonic",  # 하위 호환 및 표시용
+    "tts_executable": "supertonic",
     "playback_executable": "aplay",
     "tts_voice": "ko",
     "tts_rate": 155,
@@ -56,7 +55,6 @@ DEFAULTS = {
 
 
 def audio_config(values: dict) -> dict:
-    """Validate timing before opening hardware or allocating audio buffers."""
     cfg = {**DEFAULTS, **values}
     if not isinstance(cfg["enabled"], bool):
         raise ValueError("audio.enabled must be true or false")
@@ -89,7 +87,6 @@ def audio_config(values: dict) -> dict:
 
 
 def pcm16_rms(pcm: bytes) -> float:
-    """RMS in [0, 1] for mono little-endian signed PCM16, without audioop/numpy."""
     if len(pcm) % 2:
         raise ValueError("PCM16 data must have an even byte count")
     if not pcm:
@@ -102,8 +99,6 @@ def pcm16_rms(pcm: bytes) -> float:
 
 
 class UtteranceDetector:
-    """Simple energy VAD. Bounds utterances; requires voiced duration, not noise gaps."""
-
     def __init__(self, config: dict):
         self.config = audio_config(config)
         self.reset()
@@ -176,8 +171,6 @@ class _Cancelled(Exception):
 
 
 class AudioService:
-    """Two bounded workers for capture/STT and TTS, with explicit error reporting."""
-
     def __init__(self, config: dict, on_text: Callable[[str], None]):
         self.config = audio_config(config)
         self.on_text = on_text
@@ -196,7 +189,7 @@ class AudioService:
         self._input_generation = 0
         self._mute_until = 0.0
         self._vad = UtteranceDetector(self.config)
-        self._tts_engine = None  # Supertonic 인스턴스 저장용
+        self._tts_engine = None
 
     @property
     def speaking(self) -> bool:
@@ -247,11 +240,10 @@ class AudioService:
         if not self.config["enabled"]:
             return
         
-        # [수정] Supertonic 패키지 로드 확인
         if TTS is None:
             raise RuntimeError("Supertonic package is not installed. Run 'pip install supertonic'.")
         try:
-            # Supertonic TTS 엔진 초기화 (최초 실행 시 모델 자동 다운로드 수행)
+            # language 인자 오류를 피하기 위해 기본 초기화 수행
             self._tts_engine = TTS()
         except Exception as exc:
             raise RuntimeError(f"Failed to initialize Supertonic TTS: {exc}") from exc
@@ -410,7 +402,6 @@ class AudioService:
         target = tts_cache_path(cfg, text)
         target.parent.mkdir(parents=True, exist_ok=True)
         if not target.is_file():
-            # [수정] 외부 프로세스 호출 대신 Python 라이브러리를 통해 직접 오디오 생성
             with tempfile.TemporaryDirectory(prefix="tts-", dir=target.parent) as directory:
                 temporary = Path(directory) / "speech.wav"
                 
@@ -418,25 +409,19 @@ class AudioService:
                     raise RuntimeError("Supertonic TTS engine is not initialized.")
                 
                 try:
-                    # supertonic 패키지의 synthesize 메서드를 사용하여 음성 생성 및 파일 저장
-                    # (패키지 구조에 따라 메서드 인자가 다를 수 있으므로 아래 예시를 참고해주세요)
-                    audio_result = self._tts_engine.synthesize(text=text, language=cfg["tts_voice"])
+                    # [수정] language 인자 없이 텍스트만 전달하여 synthesize 호출 (패키지 사양 반영)
+                    audio_result = self._tts_engine.synthesize(text=text)
                     
-                    # 만약 synthesize가 파일 경로를 직접 반환하지 않고 바이트나 배열을 준다면 WAV 파일로 저장 처리
-                    if isinstance(audio_result, (str, Path)):
-                        shutil.copy(audio_result, temporary)
+                    import soundfile as sf
+                    if hasattr(audio_result, "audio"):
+                        sf.write(str(temporary), audio_result.audio, audio_result.sample_rate)
+                    elif isinstance(audio_result, tuple):
+                        sf.write(str(temporary), audio_result[0], audio_result[1])
+                    elif isinstance(audio_result, dict) and "audio" in audio_result:
+                        sf.write(str(temporary), audio_result["audio"], audio_result.get("sample_rate", 22050))
                     else:
-                        # 반환 데이터 형식에 맞게 wav 파일로 기록 (예: numpy array 혹은 bytes인 경우)
-                        # 패키지 제공 방식에 맞춰 조정 가능합니다.
-                        import soundfile as sf
-                        # 관례적으로 (data, sample_rate) 또는 바이트 형태로 반환될 수 있음
-                        if hasattr(audio_result, "audio"):
-                            sf.write(str(temporary), audio_result.audio, audio_result.sample_rate)
-                        elif isinstance(audio_result, tuple):
-                            sf.write(str(temporary), audio_result[0], audio_result[1])
-                        else:
-                            # 직접 synthesize가 지정 경로 저장 기능을 지원하는 경우
-                            self._tts_engine.synthesize(text=text, language=cfg["tts_voice"], save_path=str(temporary))
+                        # 만약 synthesize 내부에서 지정 경로 저장을 지원하는 경우
+                        self._tts_engine.synthesize(text=text, save_path=str(temporary))
                 except Exception as exc:
                     raise RuntimeError(f"Supertonic synthesis failed: {exc}") from exc
 
