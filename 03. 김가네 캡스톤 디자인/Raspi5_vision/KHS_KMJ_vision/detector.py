@@ -78,6 +78,11 @@ TARGET_MAPPING = {
 WAKE_WORDS = ("캡스톤", "갭스톤", "캡손", "캐스톤", "캡스", "캡스턴")
 WAKE_THRESHOLD = 0.35
 
+# [추가] 타겟 추적 및 획득 판정 관련 파라미터
+REACH_THRESHOLD = 50.0        # 손 중심(9번)과 물건 중심이 만났다고 판단할 거리(px)
+REQUIRED_REACH_FRAMES = 5     # 오판 방지를 위해 중심 만남이 유지되어야 하는 최소 연속 프레임 수
+MAX_JUMP_DIST = 150.0         # 같은 종류의 다른 물체로 타겟이 튀는 것을 막기 위한 최대 허용 이동 거리(px)
+
 def get_korean_name(label: str) -> str:
     if label in TARGET_MAPPING:
         return TARGET_MAPPING[label]["name"]
@@ -134,7 +139,7 @@ def main():
     config = {
         "object_model": HEF_PATH,
         "labels_file": LABELS_PATH,
-        "score_threshold": 0.3,
+        "score_threshold": 0.2,
         "max_objects": 20,
         "infer_timeout_ms": 1500,
         
@@ -174,6 +179,7 @@ def main():
     locked_target_box = None     
     locked_center = None         
     missing_frame_count = 0      
+    reach_frame_count = 0        # [추가] 손 중심과 물건 중심이 연속으로 만난 프레임 수
 
     fingertip_indices = (4, 8, 12, 16, 20)
     tip_names = ("엄지", "검지", "중지", "약지", "새끼")
@@ -234,12 +240,14 @@ def main():
                                 state = "SEARCHING"
                                 target_kor = get_korean_name(matched)
                                 
+                                # 최초 선택 시 가장 신뢰도 높은 물체를 기준점으로 고정
                                 found_target = next((det for det in obj_detections if det.label == target_eng_label), None)
                                 if found_target:
                                     locked_target_box = found_target.box
                                     x1, y1, x2, y2 = locked_target_box
                                     locked_center = (int(((x1 + x2) / 2) * width), int(((y1 + y2) / 2) * height))
                                 missing_frame_count = 0
+                                reach_frame_count = 0
 
                                 print(f"🎯 타겟 설정 완료: {target_kor} (매칭 별칭: {intent.detail})")
                                 audio_service.say(f"{target_kor}을(를) 찾아 안내합니다.")
@@ -281,6 +289,7 @@ def main():
                                 locked_target_box = None
                                 locked_center = None
                                 missing_frame_count = 0
+                                reach_frame_count = 0
                                 continue
                             elif intent.name == "list":
                                 if current_korean_list:
@@ -290,7 +299,25 @@ def main():
                             elif intent.name == "repeat" and target_eng_label:
                                 audio_service.say(f"현재 {get_korean_name(target_eng_label)}을 찾고 있습니다.")
 
-                    found_target = next((det for det in obj_detections if det.label == target_eng_label), None)
+                    # [수정 1] 동종 물체 간 타겟 튐(Switching) 방지: 이전 locked_center와 가장 가까운 객체 매칭
+                    candidates = [det for det in obj_detections if det.label == target_eng_label] if obj_detections else []
+                    found_target = None
+
+                    if candidates:
+                        if locked_center is None:
+                            found_target = candidates[0]
+                        else:
+                            def dist_from_locked(det):
+                                x1, y1, x2, y2 = det.box
+                                cx = ((x1 + x2) / 2) * width
+                                cy = ((y1 + y2) / 2) * height
+                                return math.hypot(locked_center[0] - cx, locked_center[1] - cy)
+
+                            closest_det = min(candidates, key=dist_from_locked)
+                            # 기존 위치에서 MAX_JUMP_DIST(150px) 이내일 때만 동일 물체로 인정
+                            if dist_from_locked(closest_det) < MAX_JUMP_DIST:
+                                found_target = closest_det
+
                     target_kor = get_korean_name(target_eng_label)
                     landmarks = getattr(tracker, "last_landmarks", None)
                     hand_near_target = False
@@ -306,22 +333,28 @@ def main():
                     if locked_center is not None:
                         center_x, center_y = locked_center
 
-                        # [수정됨] 손의 중심(9번 랜드마크: 중지 뿌리 관절)과 물건 중심의 거리로 도달 여부 판단
+                        # [수정 2] 손의 중심(9번 랜드마크: 중지 뿌리 관절)과 물건 중심의 거리 계산
                         if landmarks is not None:
                             hand_cx = int(landmarks[9].x * width)
                             hand_cy = int(landmarks[9].y * height)
-                            if math.hypot(center_x - hand_cx, center_y - hand_cy) < 50.0:
+                            if math.hypot(center_x - hand_cx, center_y - hand_cy) < REACH_THRESHOLD:
                                 hand_near_target = True
 
-                        # [수정됨] 손 중심과 물건 중심이 만나면(50px 미만) 가려짐 여부와 무관하게 즉시 획득 성공 판정
+                        # [수정 3] 연속 프레임 카운터로 1프레임 스침/오판 방지
                         if hand_near_target:
-                            print(f"✨ [획득 성공!] {target_kor}을(를) 집어 들었습니다!")
+                            reach_frame_count += 1
+                        else:
+                            reach_frame_count = 0
+
+                        if reach_frame_count >= REQUIRED_REACH_FRAMES:
+                            print(f"✨ [획득 성공!] {target_kor}을(를) 집어 들었습니다! ({reach_frame_count}프레임 연속 도달)")
                             audio_service.say(f"{target_kor}을(를) 찾았습니다.")
                             state = "WAIT_WAKE"
                             target_eng_label = None
                             locked_target_box = None
                             locked_center = None
                             missing_frame_count = 0
+                            reach_frame_count = 0
                             continue
 
                         if found_target is None and not hand_near_target and missing_frame_count > 45:
@@ -332,6 +365,7 @@ def main():
                             locked_target_box = None
                             locked_center = None
                             missing_frame_count = 0
+                            reach_frame_count = 0
                             continue
 
                         is_occluded = (found_target is None)
@@ -378,7 +412,8 @@ def main():
                         pt2 = (int(x2 * width), int(y2 * height))
 
                         kor_name = get_korean_name(det.label)
-                        is_target = (state == "SEARCHING" and det.label == target_eng_label)
+                        # 현재 추적 중인 타겟 객체만 노란색 박스로 강조
+                        is_target = (state == "SEARCHING" and det is found_target)
                         box_color = (0, 255, 255) if is_target else (0, 255, 0)
 
                         cv2.rectangle(display_frame, pt1, pt2, box_color, 2)
