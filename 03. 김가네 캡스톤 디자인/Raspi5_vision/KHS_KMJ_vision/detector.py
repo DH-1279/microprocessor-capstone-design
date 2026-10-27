@@ -22,14 +22,25 @@ from audio import AudioService
 import speech  # 문법 및 자모 편집 거리 기반 음성 파서
 
 # ==========================================
-# [긴급 패치 1] HailoRT Device.identify 속성 부재 오류 우회
+# [긴급 패치 1] HailoRT physical.identify().device_architecture 우회
 # ==========================================
+class _DummyHailoIdentity:
+    device_architecture = "HAILO8"
+    board_name = "Hailo-8"
+    serial_number = "0000"
+
+    def __str__(self):
+        return self.device_architecture
+
 try:
     import hailo_platform
-    for _cls_name in ("Device", "VDevice"):
-        _cls = getattr(hailo_platform, _cls_name, None)
-        if _cls is not None and not hasattr(_cls, "identify"):
-            setattr(_cls, "identify", lambda self, *a, **kw: "Hailo-8/8L")
+    for _mod in (hailo_platform, getattr(hailo_platform, "pyhailort", None), getattr(hailo_platform, "_pyhailort", None)):
+        if _mod is None:
+            continue
+        for _cls_name in ("Device", "VDevice", "PhysicalDevice"):
+            _cls = getattr(_mod, _cls_name, None)
+            if _cls is not None and not hasattr(_cls, "identify"):
+                setattr(_cls, "identify", lambda self, *a, **kw: _DummyHailoIdentity())
 except Exception:
     pass
 

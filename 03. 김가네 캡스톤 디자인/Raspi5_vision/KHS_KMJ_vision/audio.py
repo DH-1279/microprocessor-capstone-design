@@ -25,9 +25,9 @@ DEFAULTS = {
     "whisper_model": "",
     "whisper_threads": 2,
     "stt_timeout_s": 30.0,
-    "tts_executable": "espeak-ng",  # 폴백(Fallback)용으로만 유지
+    "tts_executable": "espeak-ng",
     "playback_executable": "aplay",
-    "tts_voice": "M1",              # Supertonic 기본 보이스 스타일 (예: M1, F1 등)
+    "tts_voice": "M1",
     "tts_rate": 155,
     "tts_timeout_s": 30.0,
     "cache_dir": "~/.cache/kimgane-haptic/tts",
@@ -217,7 +217,6 @@ class AudioService:
                     break
 
     def _report(self, message: str) -> None:
-        print(f"⚠️ [AudioService 경고]: {message}")
         try:
             self._errors.put_nowait(message)
         except queue.Full:
@@ -265,7 +264,6 @@ class AudioService:
         self.config["whisper_model"] = str(model.resolve())
         Path(self.config["cache_dir"]).expanduser().mkdir(parents=True, exist_ok=True)
         
-        # 시작 시 Supertonic 미리 초기화
         self._init_supertonic()
 
         try:
@@ -395,8 +393,11 @@ class AudioService:
                     continue
                 try:
                     self._play(text)
+                except _Cancelled:
+                    break
                 except Exception as exc:
-                    self._report(f"TTS 재생 중 오류 발생: {exc}")
+                    print(f"⚠️ [TTS 오류]: {exc}")
+                    self._report(f"Audio output/TTS failed: {exc}")
                 finally:
                     with self._lock:
                         self._speaking = False
@@ -405,6 +406,8 @@ class AudioService:
             pass
 
     def _play(self, text: str) -> None:
+        if self._stop.is_set():
+            raise _Cancelled()
         cfg = self.config
         target = tts_cache_path(cfg, text)
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -412,14 +415,14 @@ class AudioService:
             with tempfile.TemporaryDirectory(prefix="tts-", dir=target.parent) as directory:
                 temporary = Path(directory) / "speech.wav"
                 
-                # Supertonic Python API로 직접 음성 합성 (한국어 지원 시 lang="ko" 자동 판별/전달)
                 self._init_supertonic()
+                if self._stop.is_set():
+                    raise _Cancelled()
                 try:
                     wav_data, duration = self._tts_engine.synthesize(
                         text, voice_style=self._tts_style, lang="ko"
                     )
                 except TypeError:
-                    # 구버전 또는 lang 파라미터를 받지 않는 경우
                     wav_data, duration = self._tts_engine.synthesize(
                         text, voice_style=self._tts_style
                     )
@@ -492,7 +495,7 @@ class AudioService:
                         pass
         for worker in self._threads:
             if worker is not threading.current_thread():
-                worker.join(timeout=2)
+                worker.join(timeout=5)
                 if worker.is_alive():
                     self._report(f"Audio worker did not stop: {worker.name}")
         with self._lock:
