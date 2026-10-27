@@ -8,7 +8,7 @@
 
 - [ble_final_receiver.ino](firmware/ble_final_receiver/ble_final_receiver.ino): BLE 연결, GATT 수신, 출력 작업, PWM.
 - [pattern_protocol.h](firmware/ble_final_receiver/pattern_protocol.h): 패킷 검증, 두 안의 패턴, TTL·정지 상태기계.
-- [SENDER_CONTRACT.md](SENDER_CONTRACT.md): 나중에 라즈베리 송신부를 작성할 기준. UUID·16바이트 배치·시퀀스·STOP·Hex 예시 포함.
+- [ESP32 BLE 송수신 규격](../../docs/2026-10-27_DH_ESP32_BLE_송수신규격.md): 나중에 라즈베리 송신부를 작성할 기준. UUID·16바이트 배치·시퀀스·STOP·Hex 예시 포함.
 - [pattern_test.cpp](tests/pattern_test.cpp): 하드웨어 없는 C++ 검사.
 
 기존 `firmware/pcb_bringup`과 `firmware/haptic_receiver`는 별도 스케치다. 이 폴더에는 기존 v1과 구별되는 BLE v2 수신기가 들어 있다.
