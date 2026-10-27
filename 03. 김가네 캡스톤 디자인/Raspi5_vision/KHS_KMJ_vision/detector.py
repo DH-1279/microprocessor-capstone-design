@@ -74,7 +74,6 @@ TARGET_MAPPING = {
     "Wallet": {"name": "지갑", "aliases": ["지갑", "카드지갑"]}
 }
 
-# 시동어 후보군
 WAKE_WORDS = ("캡스톤", "갭스톤", "캡손", "캐스톤", "캡스", "캡스턴")
 WAKE_THRESHOLD = 0.35
 
@@ -156,6 +155,7 @@ def main():
         "enabled": True,
         "whisper_executable": "/home/dh1279/Desktop/kimGA_raspi/whisper.cpp/build/bin/whisper-cli",
         "whisper_model": "/home/dh1279/Desktop/kimGA_raspi/microprocessor-capstone-design/03. 김가네 캡스톤 디자인/Raspi5_vision/models/ggml-tiny.bin",
+        "tts_executable": "python3",  # [수정] Supertonic 실행용 파이썬 환경 경로
         "playback_executable": "/usr/bin/aplay",
         "cache_dir": "~/.cache/kimgane-haptic/tts",
         "output_device": "plughw:3,0",
@@ -190,11 +190,6 @@ def main():
             cv2.moveWindow(window_name, 50, 50)
             
             while True:
-                # [추가] 오디오 서비스 내부 에러 실시간 체크 및 출력
-                audio_err = audio_service.get_error()
-                if audio_err:
-                    print(f"🚨 [오디오 에러 감지]: {audio_err}")
-
                 read_result = cam.read()
                 if read_result is None:
                     print("프레임을 읽어올 수 없습니다.")
@@ -216,14 +211,12 @@ def main():
                     command_text = command_queue.get_nowait()
                     print(f"\n🗣️ [음성 인식]: {command_text}")
 
-                # 1. 시동어 대기 상태 (WAIT_WAKE)
                 if state == "WAIT_WAKE":
                     if command_text and check_wake_word(command_text):
                         print("👉 시동어 '캡스톤' 감지됨!")
                         state = "WAIT_TARGET"
                         audio_service.say("찾을 물건을 말해주세요.")
 
-                # 2. 목표 물건 선택 상태 (WAIT_TARGET)
                 elif state == "WAIT_TARGET":
                     if command_text:
                         intent = speech.parse_input(command_text, TARGET_MAPPING, state="scanning")
@@ -267,7 +260,6 @@ def main():
                             if refusal_msg:
                                 audio_service.say(refusal_msg)
 
-                # 3. 타겟 탐색 및 손 추적 상태 (SEARCHING)
                 elif state == "SEARCHING":
                     if command_text:
                         intent = speech.parse_input(command_text, TARGET_MAPPING, state="guiding")
@@ -423,7 +415,7 @@ def main():
                                       text_color=(0, 100, 255), outline_color=(255, 255, 255), font_scale=0.55, thickness=2)
 
                 if hand_result is not None:
-                    draw_hand(cv2, display_frame, tracker, hand_result)
+                    draw_hand(cv2, display_key=None, frame=display_frame, tracker=tracker, hand=hand_result) if 'display_key' in draw_hand.__code__.co_varnames else draw_hand(cv2, display_frame, tracker, hand_result)
 
                 list_str = ", ".join(current_detected_labels) if current_detected_labels else "None"
                 status_msg = f"State: {state} | Detected: [{list_str}]"

@@ -12,7 +12,6 @@ from collections import deque
 import hashlib
 import importlib
 import math
-import os
 from pathlib import Path
 import queue
 import shutil
@@ -24,15 +23,6 @@ import time
 from typing import Any, Callable
 import wave
 
-# [핵심 수정] 하이로(Hailo) 장치와의 충돌 및 오탐색 방지를 위해 ONNX Runtime 환경 변수 설정
-os.environ["CUDA_VISIBLE_DEVICES"] = ""
-os.environ["ORT_TENSORRT_UNIFIED_MEMORY_MODE"] = "0"
-
-try:
-    from supertonic import TTS
-except ImportError:
-    TTS = None
-
 
 DEFAULTS = {
     "enabled": False,
@@ -40,9 +30,10 @@ DEFAULTS = {
     "whisper_model": "",
     "whisper_threads": 2,
     "stt_timeout_s": 30.0,
-    "tts_executable": "supertonic",
+    # [수정] espeak-ng 대신 supertonic을 사용하도록 기본값 변경 (필요시 python3 및 모듈 경로 지정)
+    "tts_executable": "python3",
     "playback_executable": "aplay",
-    "tts_voice": "M1",
+    "tts_voice": "ko",
     "tts_rate": 155,
     "tts_timeout_s": 20.0,
     "cache_dir": "~/.cache/kimgane-haptic/tts",
@@ -60,6 +51,7 @@ DEFAULTS = {
 
 
 def audio_config(values: dict) -> dict:
+    """Validate timing before opening hardware or allocating audio buffers."""
     cfg = {**DEFAULTS, **values}
     if not isinstance(cfg["enabled"], bool):
         raise ValueError("audio.enabled must be true or false")
@@ -92,6 +84,7 @@ def audio_config(values: dict) -> dict:
 
 
 def pcm16_rms(pcm: bytes) -> float:
+    """RMS in [0, 1] for mono little-endian signed PCM16, without audioop/numpy."""
     if len(pcm) % 2:
         raise ValueError("PCM16 data must have an even byte count")
     if not pcm:
@@ -104,6 +97,8 @@ def pcm16_rms(pcm: bytes) -> float:
 
 
 class UtteranceDetector:
+    """Simple energy VAD. Bounds utterances; requires voiced duration, not noise gaps."""
+
     def __init__(self, config: dict):
         self.config = audio_config(config)
         self.reset()
@@ -166,7 +161,8 @@ def build_whisper_command(config: dict, wav_path: Path, output_base: Path) -> li
 
 
 def tts_cache_path(config: dict, text: str) -> Path:
-    key = f"supertonic\0{config['tts_voice']}\0{config['tts_rate']}\0{text}"
+    # [수정] 캐시 키에 supertonic 식별자 반영
+    key = f"supertonic\0{config['tts_voice']}\0{text}"
     digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
     return Path(config["cache_dir"]).expanduser() / f"{digest}.wav"
 
@@ -176,6 +172,8 @@ class _Cancelled(Exception):
 
 
 class AudioService:
+    """Two bounded workers for capture/STT and TTS, with explicit error reporting."""
+
     def __init__(self, config: dict, on_text: Callable[[str], None]):
         self.config = audio_config(config)
         self.on_text = on_text
@@ -194,7 +192,6 @@ class AudioService:
         self._input_generation = 0
         self._mute_until = 0.0
         self._vad = UtteranceDetector(self.config)
-        self._tts_engine = None
 
     @property
     def speaking(self) -> bool:
@@ -244,26 +241,12 @@ class AudioService:
             raise RuntimeError("AudioService has been closed; create a new instance")
         if not self.config["enabled"]:
             return
-        
-        if TTS is None:
-            raise RuntimeError("Supertonic package is not installed. Run 'pip install supertonic'.")
-        
-        try:
-            # CPU 전용 프로바이더를 명시하여 외부 하드웨어(Hailo NPU 등) 간섭 방지
-            try:
-                self._tts_engine = TTS(auto_download=True, providers=["CPUExecutionProvider"])
-            except TypeError:
-                self._tts_engine = TTS(auto_download=True)
-        except Exception as exc:
-            raise RuntimeError(f"Supertonic initialization failed: {exc}") from exc
-
         for key in ("whisper_executable", "playback_executable"):
             binary = str(Path(self.config[key]).expanduser())
             resolved = shutil.which(binary)
             if resolved is None:
                 raise RuntimeError(f"Audio executable missing: {key}={binary}")
             self.config[key] = resolved
-
         model = Path(self.config["whisper_model"]).expanduser()
         if not model.is_file() or model.stat().st_size == 0:
             raise RuntimeError(f"Whisper multilingual model missing or empty: {model}")
@@ -414,28 +397,19 @@ class AudioService:
             with tempfile.TemporaryDirectory(prefix="tts-", dir=target.parent) as directory:
                 temporary = Path(directory) / "speech.wav"
                 
-                if self._tts_engine is None:
-                    raise RuntimeError("Supertonic TTS engine is not initialized.")
+                # [수정] Supertonic 모델을 호출하여 WAV를 생성하는 명령어 구성
+                # Supertonic 사용법에 맞춰 인자 수정 (예: python3 -m supertonic ...)
+                command = [
+                    cfg["tts_executable"], "-m", "supertonic",
+                    "--text", text,
+                    "--output", str(temporary)
+                ]
                 
-                try:
-                    voice_name = cfg.get("tts_voice", "M1")
-                    style = self._tts_engine.get_voice_style(voice_name)
-                    synth_result = self._tts_engine.synthesize(text=text, voice_style=style)
-                    
-                    if isinstance(synth_result, tuple):
-                        wav_data, sample_rate = synth_result
-                    else:
-                        wav_data = synth_result.audio
-                        sample_rate = synth_result.sample_rate
-                    
-                    import soundfile as sf
-                    sf.write(str(temporary), wav_data, sample_rate)
-                except Exception as exc:
-                    raise RuntimeError(f"Supertonic synthesis failed: {exc}") from exc
-
+                self._run(command, cfg["tts_timeout_s"])
+                
                 with wave.open(str(temporary), "rb") as wav:
                     if wav.getnframes() == 0:
-                        raise RuntimeError("TTS generated an empty WAV")
+                        raise RuntimeError("Supertonic TTS generated an empty WAV")
                 temporary.replace(target)
                 
         command = [cfg["playback_executable"], "-q"]
