@@ -37,7 +37,7 @@ DEFAULTS = {
     "stt_timeout_s": 30.0,
     "tts_executable": "supertonic",
     "playback_executable": "aplay",
-    "tts_voice": "ko",
+    "tts_voice": "M1",  # 기본 음성 스타일 (M1~M5, F1~F5 중 선택 가능)
     "tts_rate": 155,
     "tts_timeout_s": 20.0,
     "cache_dir": "~/.cache/kimgane-haptic/tts",
@@ -243,8 +243,8 @@ class AudioService:
         if TTS is None:
             raise RuntimeError("Supertonic package is not installed. Run 'pip install supertonic'.")
         try:
-            # language 인자 오류를 피하기 위해 기본 초기화 수행
-            self._tts_engine = TTS()
+            # 자동 다운로드 활성화 상태로 Supertonic TTS 엔진 초기화
+            self._tts_engine = TTS(auto_download=True)
         except Exception as exc:
             raise RuntimeError(f"Failed to initialize Supertonic TTS: {exc}") from exc
 
@@ -409,19 +409,19 @@ class AudioService:
                     raise RuntimeError("Supertonic TTS engine is not initialized.")
                 
                 try:
-                    # [수정] language 인자 없이 텍스트만 전달하여 synthesize 호출 (패키지 사양 반영)
-                    audio_result = self._tts_engine.synthesize(text=text)
+                    # [수정] Supertonic 공식 가이드에 맞추어 voice_style 객체 및 언어(lang='ko') 전달
+                    voice_name = cfg.get("tts_voice", "M1")
+                    style = self._tts_engine.get_voice_style(voice_name)
+                    
+                    # synthesize 호출 시 wav 데이터와 sample_rate 반환됨
+                    wav_data, sample_rate = self._tts_engine.synthesize(
+                        text=text, 
+                        voice_style=style, 
+                        lang="ko"
+                    )
                     
                     import soundfile as sf
-                    if hasattr(audio_result, "audio"):
-                        sf.write(str(temporary), audio_result.audio, audio_result.sample_rate)
-                    elif isinstance(audio_result, tuple):
-                        sf.write(str(temporary), audio_result[0], audio_result[1])
-                    elif isinstance(audio_result, dict) and "audio" in audio_result:
-                        sf.write(str(temporary), audio_result["audio"], audio_result.get("sample_rate", 22050))
-                    else:
-                        # 만약 synthesize 내부에서 지정 경로 저장을 지원하는 경우
-                        self._tts_engine.synthesize(text=text, save_path=str(temporary))
+                    sf.write(str(temporary), wav_data, sample_rate)
                 except Exception as exc:
                     raise RuntimeError(f"Supertonic synthesis failed: {exc}") from exc
 
