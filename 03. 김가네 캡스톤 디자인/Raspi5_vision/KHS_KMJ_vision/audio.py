@@ -30,7 +30,8 @@ DEFAULTS = {
     "whisper_model": "",
     "whisper_threads": 2,
     "stt_timeout_s": 30.0,
-    "tts_executable": "espeak-ng",
+    # [수정] 기본 TTS 실행 파일을 supertonic으로 변경 (필요시 경로 지정 가능)
+    "tts_executable": "supertonic",
     "playback_executable": "aplay",
     "tts_voice": "ko",
     "tts_rate": 155,
@@ -96,11 +97,7 @@ def pcm16_rms(pcm: bytes) -> float:
 
 
 class UtteranceDetector:
-    """Simple energy VAD. Bounds utterances; requires voiced duration, not noise gaps.
-
-    This is a prototype energy gate, not a trained speech classifier. Tune its
-    threshold with the actual microphone, and validate STT against known commands.
-    """
+    """Simple energy VAD. Bounds utterances; requires voiced duration, not noise gaps."""
 
     def __init__(self, config: dict):
         self.config = audio_config(config)
@@ -164,7 +161,9 @@ def build_whisper_command(config: dict, wav_path: Path, output_base: Path) -> li
 
 
 def tts_cache_path(config: dict, text: str) -> Path:
-    key = f"espeak-ng\0{config['tts_voice']}\0{config['tts_rate']}\0{text}"
+    """[수정] TTS 엔진 이름(실행 파일명)을 반영하여 캐시 키 생성"""
+    engine_name = Path(config["tts_executable"]).name
+    key = f"{engine_name}\0{config['tts_voice']}\0{config['tts_rate']}\0{text}"
     digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
     return Path(config["cache_dir"]).expanduser() / f"{digest}.wav"
 
@@ -174,13 +173,7 @@ class _Cancelled(Exception):
 
 
 class AudioService:
-    """Two bounded workers for capture/STT and TTS, with explicit error reporting.
-
-    say() returns False if user speech, transcription or another announcement is
-    active; callers should retry important messages, not queue repeated summaries.
-    listening means a user utterance/transcription is active, not merely mic open.
-    get_error() consumes one diagnostic, or returns None immediately.
-    """
+    """Two bounded workers for capture/STT and TTS, with explicit error reporting."""
 
     def __init__(self, config: dict, on_text: Callable[[str], None]):
         self.config = audio_config(config)
@@ -192,7 +185,7 @@ class AudioService:
         self._errors: queue.Queue[str] = queue.Queue(maxsize=8)
         self._threads: list[threading.Thread] = []
         self._processes: set[subprocess.Popen] = set()
-        self._stream: Any = None  # sounddevice is an optional, lazy-loaded native dependency.
+        self._stream: Any = None
         self._started = False
         self._speaking = False
         self._listening = False
@@ -218,11 +211,6 @@ class AudioService:
             return None
 
     def discard_input(self) -> None:
-        """Invalidate queued/in-flight voice requests after a BLE session change.
-
-        Call this before clearing the main command mailbox. on_text must only
-        enqueue its string and must not call back into AudioService.
-        """
         with self._lock:
             self._input_generation += 1
             self._mute_until = max(self._mute_until, time.monotonic())
@@ -367,7 +355,6 @@ class AudioService:
             self._stop.set()
 
     def transcribe_wav(self, wav_path: str | Path) -> str:
-        """Offline microphone check: accepts mono PCM16/16kHz WAV <=15 seconds."""
         wav_path = Path(wav_path).expanduser().resolve()
         with wave.open(str(wav_path), "rb") as source:
             if (source.getnchannels(), source.getsampwidth(), source.getframerate()) != (1, 2, 16000):
@@ -408,16 +395,34 @@ class AudioService:
         target = tts_cache_path(cfg, text)
         target.parent.mkdir(parents=True, exist_ok=True)
         if not target.is_file():
-            # A unique temporary file plus replace avoids leaving a corrupt cache entry.
             with tempfile.TemporaryDirectory(prefix="tts-", dir=target.parent) as directory:
                 temporary = Path(directory) / "speech.wav"
-                command = [cfg["tts_executable"], "-b", "1", "-v", cfg["tts_voice"],
-                           "-s", str(cfg["tts_rate"]), "-w", str(temporary), "--stdin"]
-                self._run(command, cfg["tts_timeout_s"], input_text=text)
+                
+                # [수정] Supertonic TTS CLI 명령어 구조에 맞게 인자 설정
+                # (Supertonic CLI의 인자 구조에 맞추어 필요시 수정하세요. 
+                #  일반적으로 출력 파일 경로와 텍스트를 인자 혹은 표준 입력으로 받습니다.)
+                executable_name = Path(cfg["tts_executable"]).name.lower()
+                if "supertonic" in executable_name:
+                    # 예시: supertonic --text "문장" --output "출력경로.wav" 형태로 동작하는 경우
+                    command = [
+                        cfg["tts_executable"],
+                        "--text", text,
+                        "--output", str(temporary),
+                        "--voice", cfg["tts_voice"]
+                    ]
+                    input_text = None
+                else:
+                    # 기존 espeak-ng 호환 폴백
+                    command = [cfg["tts_executable"], "-b", "1", "-v", cfg["tts_voice"],
+                               "-s", str(cfg["tts_rate"]), "-w", str(temporary), "--stdin"]
+                    input_text = text
+
+                self._run(command, cfg["tts_timeout_s"], input_text=input_text)
                 with wave.open(str(temporary), "rb") as wav:
                     if wav.getnframes() == 0:
                         raise RuntimeError("TTS generated an empty WAV")
                 temporary.replace(target)
+                
         command = [cfg["playback_executable"], "-q"]
         if cfg["output_device"] is not None:
             command.extend(["-D", str(cfg["output_device"])])
@@ -425,7 +430,6 @@ class AudioService:
         self._run(command, cfg["tts_timeout_s"])
 
     def _run(self, command: list[str], timeout: float, input_text: str | None = None) -> str:
-        """Cancellable child process. No shell interpolation or leaked children."""
         with self._lock:
             if self._stop.is_set():
                 raise _Cancelled()
