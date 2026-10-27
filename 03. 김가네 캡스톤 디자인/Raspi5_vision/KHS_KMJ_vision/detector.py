@@ -18,7 +18,7 @@ from haptic_mvp.vision import HailoDetector, CameraSource
 from haptic_mvp.models import Detection
 from hand_tracker import HandTracker, draw_hand
 from audio import AudioService
-import speech  # [추가] 문법 및 자모 편집 거리 기반 음성 파서
+import speech  # 문법 및 자모 편집 거리 기반 음성 파서
 
 # ==========================================
 # [긴급 패치] 신뢰도 및 박스 좌표 오차 우회
@@ -77,6 +77,11 @@ TARGET_MAPPING = {
 # 시동어 후보군 (tiny 모델의 발음 뭉개짐 대비)
 WAKE_WORDS = ("캡스톤", "갭스톤", "캡손", "캐스톤", "캡스", "캡스턴")
 WAKE_THRESHOLD = 0.35
+
+# 손 중심과 물건 중심이 만났다고 판정할 거리 임계값 (픽셀 단위)
+REACH_THRESHOLD = 45.0
+# 손 중심으로 사용할 MediaPipe 랜드마크 인덱스 (9번: 중지 뿌리 관절 / 손바닥 중앙)
+HAND_CENTER_IDX = 9
 
 def get_korean_name(label: str) -> str:
     if label in TARGET_MAPPING:
@@ -174,9 +179,6 @@ def main():
     locked_target_box = None     
     locked_center = None         
     missing_frame_count = 0      
-
-    fingertip_indices = (4, 8, 12, 16, 20)
-    tip_names = ("엄지", "검지", "중지", "약지", "새끼")
 
     try:
         with CameraSource(config) as cam, \
@@ -305,16 +307,32 @@ def main():
 
                     if locked_center is not None:
                         center_x, center_y = locked_center
+                        hand_center = None
+                        dist_to_target = float("inf")
 
+                        # [방법 A] 9번 랜드마크(중지 뿌리 관절)를 손의 중심으로 계산
                         if landmarks is not None:
-                            for idx in fingertip_indices:
-                                tip_x = int(landmarks[idx].x * width)
-                                tip_y = int(landmarks[idx].y * height)
-                                if math.hypot(center_x - tip_x, center_y - tip_y) < 50.0:
-                                    hand_near_target = True
-                                    break
+                            hand_cx = int(landmarks[HAND_CENTER_IDX].x * width)
+                            hand_cy = int(landmarks[HAND_CENTER_IDX].y * height)
+                            hand_center = (hand_cx, hand_cy)
 
-                        if found_target is None and not hand_near_target and missing_frame_count > 45:
+                            dist_to_target = math.hypot(center_x - hand_cx, center_y - hand_cy)
+                            if dist_to_target <= REACH_THRESHOLD:
+                                hand_near_target = True
+
+                        # 손의 중심과 물건의 중심이 만나면(임계값 이하) 즉시 획득 성공 판정
+                        if hand_near_target:
+                            print(f"✨ [획득 성공!] 손 중심과 {target_kor} 중심이 만났습니다! (거리: {dist_to_target:.1f}px)")
+                            audio_service.say(f"{target_kor}을(를) 찾았습니다.")
+                            state = "WAIT_WAKE"
+                            target_eng_label = None
+                            locked_target_box = None
+                            locked_center = None
+                            missing_frame_count = 0
+                            continue
+
+                        # 물건이 장시간(45프레임) 안 보일 때 타겟 해제
+                        if found_target is None and missing_frame_count > 45:
                             print(f"⚠️ {target_kor}을(를) 장시간 찾을 수 없어 타겟을 해제합니다.")
                             audio_service.say("물건을 찾을 수 없습니다. 다시 말씀해 주세요.")
                             state = "WAIT_TARGET"
@@ -324,42 +342,27 @@ def main():
                             missing_frame_count = 0
                             continue
 
-                        if found_target is None and hand_near_target:
-                            print(f"✨ [획득 성공!] {target_kor}을(를) 집어 들었습니다!")
-                            audio_service.say(f"{target_kor}을(를) 찾았습니다.")
-                            state = "WAIT_WAKE"
-                            target_eng_label = None
-                            locked_target_box = None
-                            locked_center = None
-                            missing_frame_count = 0
-                            continue
-
                         is_occluded = (found_target is None)
                         status_str = " (⚠️ 손에 가려짐)" if is_occluded else ""
-                        print(f"\n🎯 [탐색 중{status_str}] 목표: {target_kor} | 중심: ({center_x}, {center_y})")
+                        print(f"\n🎯 [탐색 중{status_str}] 목표: {target_kor} | 물건 중심: ({center_x}, {center_y})")
 
-                        if landmarks is not None:
-                            coord_strs = []
-                            dist_strs = []
+                        # 손 중심 <-> 물건 중심 점선 및 거리 시각화
+                        if hand_center is not None:
+                            hand_cx, hand_cy = hand_center
                             overlay = display_frame.copy()
 
-                            for idx, name in zip(fingertip_indices, tip_names):
-                                tip_x = int(landmarks[idx].x * width)
-                                tip_y = int(landmarks[idx].y * height)
-                                dist = math.hypot(center_x - tip_x, center_y - tip_y)
-                                
-                                coord_strs.append(f"{name}({tip_x},{tip_y})")
-                                dist_strs.append(f"{name}: {dist:.1f}px")
-
-                                draw_dashed_line(overlay, (tip_x, tip_y), (center_x, center_y), color=(30, 30, 30), thickness=2)
-                                mid_x = int((tip_x + center_x) / 2)
-                                mid_y = int((tip_y + center_y) / 2)
-                                put_readable_text(overlay, f"{dist:.0f}px", (mid_x - 15, mid_y), font_scale=0.45)
+                            # 손 중심점에 보라색 원 표시
+                            cv2.circle(overlay, (hand_cx, hand_cy), 7, (255, 0, 255), -1)
+                            draw_dashed_line(overlay, (hand_cx, hand_cy), (center_x, center_y), color=(30, 30, 30), thickness=2)
+                            
+                            mid_x = int((hand_cx + center_x) / 2)
+                            mid_y = int((hand_cy + center_y) / 2)
+                            put_readable_text(overlay, f"{dist_to_target:.0f}px", (mid_x - 15, mid_y), font_scale=0.5)
 
                             cv2.addWeighted(overlay, 0.75, display_frame, 0.25, 0, display_frame)
 
-                            print(f"    ├ 📍 손가락 절대 좌표: " + ", ".join(coord_strs))
-                            print(f"    └ 📏 목표와의 거리: " + " / ".join(dist_strs))
+                            print(f"    ├ 📍 손 중심 좌표: ({hand_cx}, {hand_cy})")
+                            print(f"    └ 📏 목표 중심과의 거리: {dist_to_target:.1f}px")
                         else:
                             print("    └ 🖐️ 손이 감지되지 않았습니다.")
                     else:
