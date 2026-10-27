@@ -155,7 +155,7 @@ def main():
         "enabled": True,
         "whisper_executable": "/home/dh1279/Desktop/kimGA_raspi/whisper.cpp/build/bin/whisper-cli",
         "whisper_model": "/home/dh1279/Desktop/kimGA_raspi/microprocessor-capstone-design/03. 김가네 캡스톤 디자인/Raspi5_vision/models/ggml-tiny.bin",
-        "tts_executable": "python3",  # [수정] Supertonic 실행용 파이썬 환경 경로
+        "tts_executable": "python3",  # Supertonic 실행 환경
         "playback_executable": "/usr/bin/aplay",
         "cache_dir": "~/.cache/kimgane-haptic/tts",
         "output_device": "plughw:3,0",
@@ -415,7 +415,7 @@ def main():
                                       text_color=(0, 100, 255), outline_color=(255, 255, 255), font_scale=0.55, thickness=2)
 
                 if hand_result is not None:
-                    draw_hand(cv2, display_key=None, frame=display_frame, tracker=tracker, hand=hand_result) if 'display_key' in draw_hand.__code__.co_varnames else draw_hand(cv2, display_frame, tracker, hand_result)
+                    draw_hand(cv2, display_frame, tracker, hand_result)
 
                 list_str = ", ".join(current_detected_labels) if current_detected_labels else "None"
                 status_msg = f"State: {state} | Detected: [{list_str}]"
