@@ -37,7 +37,7 @@ DEFAULTS = {
     "stt_timeout_s": 30.0,
     "tts_executable": "supertonic",
     "playback_executable": "aplay",
-    "tts_voice": "M1",  # 기본 음성 스타일 (M1~M5, F1~F5 중 선택 가능)
+    "tts_voice": "M1",
     "tts_rate": 155,
     "tts_timeout_s": 20.0,
     "cache_dir": "~/.cache/kimgane-haptic/tts",
@@ -242,11 +242,13 @@ class AudioService:
         
         if TTS is None:
             raise RuntimeError("Supertonic package is not installed. Run 'pip install supertonic'.")
+        
+        # [수정] Supertonic 초기화 에러 시 프로그램 전체가 죽지 않도록 예외 처리
         try:
-            # 자동 다운로드 활성화 상태로 Supertonic TTS 엔진 초기화
             self._tts_engine = TTS(auto_download=True)
         except Exception as exc:
-            raise RuntimeError(f"Failed to initialize Supertonic TTS: {exc}") from exc
+            self._report(f"Supertonic initialization failed: {exc}")
+            self._tts_engine = None
 
         for key in ("whisper_executable", "playback_executable"):
             binary = str(Path(self.config[key]).expanduser())
@@ -406,14 +408,11 @@ class AudioService:
                 temporary = Path(directory) / "speech.wav"
                 
                 if self._tts_engine is None:
-                    raise RuntimeError("Supertonic TTS engine is not initialized.")
+                    raise RuntimeError("Supertonic TTS engine failed to initialize due to environment/version incompatibility.")
                 
                 try:
-                    # [수정] Supertonic 공식 가이드에 맞추어 voice_style 객체 및 언어(lang='ko') 전달
                     voice_name = cfg.get("tts_voice", "M1")
                     style = self._tts_engine.get_voice_style(voice_name)
-                    
-                    # synthesize 호출 시 wav 데이터와 sample_rate 반환됨
                     wav_data, sample_rate = self._tts_engine.synthesize(
                         text=text, 
                         voice_style=style, 
