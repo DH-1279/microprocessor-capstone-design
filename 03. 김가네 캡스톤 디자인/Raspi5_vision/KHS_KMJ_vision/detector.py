@@ -4,6 +4,7 @@ import cv2
 import math
 import queue
 import time
+import traceback
 from pathlib import Path
 
 # PortAudio(sounddevice)가 hw 대신 plughw를 사용하도록 강제
@@ -21,7 +22,19 @@ from audio import AudioService
 import speech  # 문법 및 자모 편집 거리 기반 음성 파서
 
 # ==========================================
-# [긴급 패치] 신뢰도 및 박스 좌표 오차 우회
+# [긴급 패치 1] HailoRT Device.identify 속성 부재 오류 우회
+# ==========================================
+try:
+    import hailo_platform
+    for _cls_name in ("Device", "VDevice"):
+        _cls = getattr(hailo_platform, _cls_name, None)
+        if _cls is not None and not hasattr(_cls, "identify"):
+            setattr(_cls, "identify", lambda self, *a, **kw: "Hailo-8/8L")
+except Exception:
+    pass
+
+# ==========================================
+# [긴급 패치 2] 신뢰도 및 박스 좌표 오차 우회
 # ==========================================
 def patched_decode_hailo_nms(raw, labels, geometry, threshold=0.5, max_objects=20):
     found = []
@@ -155,8 +168,9 @@ def main():
         "enabled": True,
         "whisper_executable": "/home/dh1279/Desktop/kimGA_raspi/whisper.cpp/build/bin/whisper-cli",
         "whisper_model": "/home/dh1279/Desktop/kimGA_raspi/microprocessor-capstone-design/03. 김가네 캡스톤 디자인/Raspi5_vision/models/ggml-tiny.bin",
-        "tts_executable": "python3",  # Supertonic 실행 환경
+        "tts_executable": "/usr/bin/espeak-ng",
         "playback_executable": "/usr/bin/aplay",
+        "tts_voice": "M1",  # Supertonic 보이스 스타일 (M1, F1 등)
         "cache_dir": "~/.cache/kimgane-haptic/tts",
         "output_device": "plughw:3,0",
         "input_device": 1 
@@ -431,6 +445,7 @@ def main():
         print("\n프로그램을 안전하게 종료합니다.")
     except Exception as e:
         print(f"실행 중 에러가 발생했습니다: {e}")
+        traceback.print_exc()
     finally:
         audio_service.close()
         cv2.destroyAllWindows()

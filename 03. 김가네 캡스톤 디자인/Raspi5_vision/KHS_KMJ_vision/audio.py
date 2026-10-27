@@ -1,9 +1,4 @@
-"""Local Korean voice input/output. Importing this module requires only stdlib.
-
-Hardware audio is lazy-loaded by start(). All inference/playback is performed in
-workers, so callers must hand on_text to a thread-safe command queue. This is
-half-duplex audio: speech input is discarded during TTS and its echo cooldown.
-"""
+"""Local Korean voice input/output with Supertonic Python TTS."""
 
 from __future__ import annotations
 
@@ -30,11 +25,11 @@ DEFAULTS = {
     "whisper_model": "",
     "whisper_threads": 2,
     "stt_timeout_s": 30.0,
-    "tts_executable": "python3",
+    "tts_executable": "espeak-ng",  # 폴백(Fallback)용으로만 유지
     "playback_executable": "aplay",
-    "tts_voice": "ko",
+    "tts_voice": "M1",              # Supertonic 기본 보이스 스타일 (예: M1, F1 등)
     "tts_rate": 155,
-    "tts_timeout_s": 20.0,
+    "tts_timeout_s": 30.0,
     "cache_dir": "~/.cache/kimgane-haptic/tts",
     "input_device": None,
     "output_device": None,
@@ -183,6 +178,8 @@ class AudioService:
         self._threads: list[threading.Thread] = []
         self._processes: set[subprocess.Popen] = set()
         self._stream: Any = None
+        self._tts_engine: Any = None
+        self._tts_style: Any = None
         self._started = False
         self._speaking = False
         self._listening = False
@@ -220,6 +217,7 @@ class AudioService:
                     break
 
     def _report(self, message: str) -> None:
+        print(f"⚠️ [AudioService 경고]: {message}")
         try:
             self._errors.put_nowait(message)
         except queue.Full:
@@ -231,6 +229,22 @@ class AudioService:
                 self._errors.put_nowait(message)
             except queue.Full:
                 pass
+
+    def _init_supertonic(self) -> None:
+        """Supertonic 파이썬 패키지를 메모리에 한 번만 로드합니다."""
+        if self._tts_engine is not None:
+            return
+        from supertonic import TTS
+        print("🔊 Supertonic TTS 모델을 로드하는 중...")
+        self._tts_engine = TTS(auto_download=True)
+        voice_name = self.config.get("tts_voice", "M1")
+        if voice_name in getattr(self._tts_engine, "voice_style_names", []):
+            self._tts_style = self._tts_engine.get_voice_style(voice_name)
+        elif getattr(self._tts_engine, "voice_style_names", None):
+            self._tts_style = self._tts_engine.get_voice_style(self._tts_engine.voice_style_names[0])
+        else:
+            self._tts_style = self._tts_engine.get_voice_style("M1")
+        print("✅ Supertonic TTS 모델 로드 완료!")
 
     def start(self) -> None:
         if self._started:
@@ -250,24 +264,21 @@ class AudioService:
             raise RuntimeError(f"Whisper multilingual model missing or empty: {model}")
         self.config["whisper_model"] = str(model.resolve())
         Path(self.config["cache_dir"]).expanduser().mkdir(parents=True, exist_ok=True)
+        
+        # 시작 시 Supertonic 미리 초기화
+        self._init_supertonic()
+
         try:
             sd = importlib.import_module("sounddevice")
         except ImportError as exc:
             raise RuntimeError("Install sounddevice and the system libportaudio2 package") from exc
         try:
-            in_dev = self.config.get("input_device")
-            stream_kwargs = {
-                "samplerate": self.config["sample_rate"],
-                "channels": 1,
-                "dtype": "int16",
-                "blocksize": self.config["sample_rate"] * self.config["block_ms"] // 1000,
-                "callback": self._capture,
-                "finished_callback": self._input_finished,
-            }
-            if in_dev is not None:
-                stream_kwargs["device"] = in_dev
-
-            self._stream = sd.RawInputStream(**stream_kwargs)
+            self._stream = sd.RawInputStream(
+                samplerate=self.config["sample_rate"], channels=1, dtype="int16",
+                blocksize=self.config["sample_rate"] * self.config["block_ms"] // 1000,
+                device=self.config["input_device"], callback=self._capture,
+                finished_callback=self._input_finished,
+            )
             self._stream.start()
             self._started = True
             for name, target in (("audio-stt", self._listen_worker), ("audio-tts", self._speak_worker)):
@@ -384,15 +395,14 @@ class AudioService:
                     continue
                 try:
                     self._play(text)
+                except Exception as exc:
+                    self._report(f"TTS 재생 중 오류 발생: {exc}")
                 finally:
                     with self._lock:
                         self._speaking = False
                         self._mute_until = time.monotonic() + self.config["echo_cooldown_ms"] / 1000
         except _Cancelled:
             pass
-        except Exception as exc:
-            self._report(f"Audio output/TTS failed: {exc}")
-            self._stop.set()
 
     def _play(self, text: str) -> None:
         cfg = self.config
@@ -402,13 +412,18 @@ class AudioService:
             with tempfile.TemporaryDirectory(prefix="tts-", dir=target.parent) as directory:
                 temporary = Path(directory) / "speech.wav"
                 
-                command = [
-                    cfg["tts_executable"], "-m", "supertonic",
-                    "--text", text,
-                    "--output", str(temporary)
-                ]
-                
-                self._run(command, cfg["tts_timeout_s"])
+                # Supertonic Python API로 직접 음성 합성 (한국어 지원 시 lang="ko" 자동 판별/전달)
+                self._init_supertonic()
+                try:
+                    wav_data, duration = self._tts_engine.synthesize(
+                        text, voice_style=self._tts_style, lang="ko"
+                    )
+                except TypeError:
+                    # 구버전 또는 lang 파라미터를 받지 않는 경우
+                    wav_data, duration = self._tts_engine.synthesize(
+                        text, voice_style=self._tts_style
+                    )
+                self._tts_engine.save_audio(wav_data, str(temporary))
                 
                 with wave.open(str(temporary), "rb") as wav:
                     if wav.getnframes() == 0:
