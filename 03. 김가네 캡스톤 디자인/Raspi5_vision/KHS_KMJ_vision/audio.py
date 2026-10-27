@@ -243,12 +243,15 @@ class AudioService:
         if TTS is None:
             raise RuntimeError("Supertonic package is not installed. Run 'pip install supertonic'.")
         
-        # [수정] Supertonic 초기화 에러 시 프로그램 전체가 죽지 않도록 예외 처리
         try:
-            self._tts_engine = TTS(auto_download=True)
+            # [핵심 수정] 라즈베리파이 5에서 장치 식별 에러(identify)를 방지하기 위해 CPU 프로바이더 강제 지정
+            try:
+                self._tts_engine = TTS(auto_download=True, providers=["CPUExecutionProvider"])
+            except TypeError:
+                # providers 인자를 지원하지 않는 패키지 버전을 위한 차선책
+                self._tts_engine = TTS(auto_download=True)
         except Exception as exc:
-            self._report(f"Supertonic initialization failed: {exc}")
-            self._tts_engine = None
+            raise RuntimeError(f"Supertonic initialization failed: {exc}") from exc
 
         for key in ("whisper_executable", "playback_executable"):
             binary = str(Path(self.config[key]).expanduser())
@@ -408,16 +411,18 @@ class AudioService:
                 temporary = Path(directory) / "speech.wav"
                 
                 if self._tts_engine is None:
-                    raise RuntimeError("Supertonic TTS engine failed to initialize due to environment/version incompatibility.")
+                    raise RuntimeError("Supertonic TTS engine is not initialized.")
                 
                 try:
                     voice_name = cfg.get("tts_voice", "M1")
                     style = self._tts_engine.get_voice_style(voice_name)
-                    wav_data, sample_rate = self._tts_engine.synthesize(
-                        text=text, 
-                        voice_style=style, 
-                        lang="ko"
-                    )
+                    synth_result = self._tts_engine.synthesize(text=text, voice_style=style)
+                    
+                    if isinstance(synth_result, tuple):
+                        wav_data, sample_rate = synth_result
+                    else:
+                        wav_data = synth_result.audio
+                        sample_rate = synth_result.sample_rate
                     
                     import soundfile as sf
                     sf.write(str(temporary), wav_data, sample_rate)
