@@ -5,6 +5,7 @@ import math
 import queue
 import time
 import traceback
+import subprocess
 from pathlib import Path
 
 # PortAudio(sounddevice)가 hw 대신 plughw를 사용하도록 강제
@@ -168,6 +169,13 @@ def put_readable_text(img, text, pos, font_scale=0.5, text_color=(20, 20, 20), o
     cv2.putText(img, text, pos, cv2.FONT_HERSHEY_SIMPLEX, font_scale, text_color, thickness, cv2.LINE_AA)
 
 def main():
+    # 프로그램 시작 시 오디오 볼륨을 강제로 100%로 설정하여 소리 키우기
+    try:
+        subprocess.run(["amixer", "-c", "3", "set", "PCM", "100%"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(["amixer", "set", "Master", "100%"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+
     config = {
         "object_model": HEF_PATH,
         "labels_file": LABELS_PATH,
@@ -224,7 +232,8 @@ def main():
              HandTracker(config) as tracker:
              
             window_name = "Capstone Vision Controller"
-            cv2.namedWindow(window_name)
+            cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+            cv2.setWindowProperty(window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN) # 디스플레이 화면에 꽉 차게 전체 화면 설정
             cv2.moveWindow(window_name, 50, 50)
             
             while True:
