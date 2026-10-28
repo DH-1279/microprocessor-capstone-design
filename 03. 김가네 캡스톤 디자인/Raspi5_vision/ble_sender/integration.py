@@ -5,6 +5,7 @@ import math
 import threading
 
 from .cli import parser as sender_parser, run
+from .link import startup_budget
 from .publisher import VisionPublisher
 
 
@@ -56,7 +57,7 @@ class DetectorBLE:
         self.thread.start()
         # Budget includes scanning, connection, initial I/O and cleanup. It
         # must not cancel a legitimate 30s connection after only 30s total.
-        startup_timeout = self.args.scan_timeout + self.args.connect_timeout + 12
+        startup_timeout = startup_budget(self.args.scan_timeout, self.args.connect_timeout)
         if not self.ready.wait(startup_timeout):
             self.close()
             raise TimeoutError("BLE 초기화 시간 초과: ESP 전원과 Bluetooth를 확인하세요.")

@@ -290,6 +290,72 @@ class AsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(client.is_connected)
         self.assertEqual(factory.call_args.kwargs["timeout"], 30)
 
+    async def test_initial_stop_can_take_longer_than_active_write_deadline(self):
+        client = FakeClient()
+        original_write = client.write_gatt_char
+
+        async def first_write(*args, **kwargs):
+            if not client.writes:
+                await asyncio.sleep(0.35)
+            await original_write(*args, **kwargs)
+
+        client.write_gatt_char = first_write
+        client.connect = AsyncMock()
+        client.read_gatt_char = AsyncMock(return_value=PACKET.pack(2, 17, 0, 0, 2, 0, 1, 0, 0, 0, 0, 0, 0, 0))
+        module = SimpleNamespace(
+            BleakClient=lambda *a, **kw: client,
+            BleakScanner=SimpleNamespace(
+                find_device_by_address=AsyncMock(return_value=SimpleNamespace(address="AA:BB:CC:DD:EE:FF"))
+            ),
+        )
+        with patch.dict(sys.modules, bleak=module), patch("builtins.print"):
+            async with Link("AA:BB:CC:DD:EE:FF"):
+                self.assertEqual(PACKET.unpack(client.writes[0][1])[1], 1)
+        self.assertFalse(client.is_connected)
+
+    async def test_active_write_deadline_remains_300ms(self):
+        link = Link()
+        link.client = FakeClient()
+        with patch("ble_sender.link.asyncio.wait_for", wraps=asyncio.wait_for) as waiting:
+            await link.send(Cue(2, 0, 1))
+            self.assertEqual(waiting.call_args.args[1], 0.3)
+        await link.close()
+
+    async def test_failed_initial_stop_is_not_retried_on_stalled_att(self):
+        client = FakeClient()
+        client.connect = AsyncMock()
+        client.write_gatt_char = AsyncMock(side_effect=TimeoutError())
+        module = SimpleNamespace(
+            BleakClient=lambda *a, **kw: client,
+            BleakScanner=SimpleNamespace(
+                find_device_by_address=AsyncMock(return_value=SimpleNamespace(address="AA:BB:CC:DD:EE:FF"))
+            ),
+        )
+        with patch.dict(sys.modules, bleak=module), patch("builtins.print"):
+            with self.assertRaisesRegex(RuntimeError, "초기 STOP 전송 시간 초과"):
+                async with Link("AA:BB:CC:DD:EE:FF"):
+                    self.fail("write should fail")
+        self.assertEqual(client.write_gatt_char.await_count, 1)
+        self.assertFalse(client.is_connected)
+
+    async def test_standalone_check_sends_only_stop_and_reads_status(self):
+        from ble_sender.check_link import run
+
+        client = FakeClient()
+        client.connect = AsyncMock()
+        client.read_gatt_char = AsyncMock(return_value=PACKET.pack(2, 17, 0, 0, 2, 0, 1, 0, 0, 0, 0, 0, 0, 0))
+        module = SimpleNamespace(
+            BleakClient=lambda *a, **kw: client,
+            BleakScanner=SimpleNamespace(
+                find_device_by_address=AsyncMock(return_value=SimpleNamespace(address="AA:BB:CC:DD:EE:FF"))
+            ),
+        )
+        with patch.dict(sys.modules, bleak=module), patch("builtins.print"):
+            await run(SimpleNamespace(address="AA:BB:CC:DD:EE:FF", scan_timeout=10, connect_timeout=30, samples=2))
+        self.assertTrue(all(PACKET.unpack(packet)[1] == 1 for _, packet, _ in client.writes))
+        self.assertEqual(client.read_gatt_char.await_count, 3)
+        self.assertFalse(client.is_connected)
+
     async def test_connect_timeout_names_stage_and_disconnects(self):
         client = FakeClient()
         client.connect = AsyncMock(side_effect=TimeoutError())
