@@ -120,8 +120,9 @@ void setup() {
   advertising->enableScanResponse(true);
   advertising->addServiceUUID(SERVICE_UUID); advertising->setName(NAME);
   ready = advertising->start();
-  Serial.printf("BLE V2 | %s | %s | modes=2,3 | TH=0 IN=1 MI=3 RI=4 PI=5\n",
-                ready ? "READY" : "ADVERTISING FAILED", DRY_RUN ? "DRY_RUN" : "MOTORS");
+  uint8_t features[haptic2::kSize]; snapshot(features);
+  Serial.printf("BLE V2 | %s | %s | caps=%02X | acquire=350,200,350ms | near=repeat | modes=2,3 | TH=0 IN=1 MI=3 RI=4 PI=5\n",
+                ready ? "READY" : "ADVERTISING FAILED", DRY_RUN ? "DRY_RUN" : "MOTORS", features[15]);
 }
 
 void loop() {

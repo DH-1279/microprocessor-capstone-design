@@ -41,7 +41,7 @@ class Cue:
 
     def describe(self):
         if self.arrival_id is not None:
-            return f"도달 id={self.arrival_id} | ALL duty=255 | 150/150/150ms 한 회"
+            return f"획득 id={self.arrival_id} | ALL duty=255 | 350/200/350ms 한 회"
         if self.zones is not None:
             zones = ",".join(f"{ch.name}={Zone(z).name}" for ch, z in zip(Channel, self.zones))
             return f"mode=2 | {zones} | duty={self.duties}"
@@ -111,7 +111,7 @@ class Status:
             or zone > 2
             or channel > 4
             or phase > 1
-            or tail[-1] & ~3
+            or tail[-1] & ~7
         ):
             raise ValueError("invalid v2 status")
         return cls(flags, seq, ttl, mode, zone, channel, bool(phase), tuple(tail[:5]), tail[-1])

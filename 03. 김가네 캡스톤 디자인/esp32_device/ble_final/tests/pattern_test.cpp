@@ -42,14 +42,14 @@ int main() {
   // Direction switches start a new cue and zero every previous channel.
   command(p, 16, 3, 0, 0); CHECK(s.receive(p, sizeof(p), 3300)); status(s, 3300, 0, 150);
   command(p, 17, 3, 0, 4); CHECK(s.receive(p, sizeof(p), 3350)); status(s, 3350, 4, 190);
-  // Near double tap: no continuous drive and no repeat on heartbeats.
+  // Near repeats until acquisition/STOP; heartbeats preserve the phase.
   command(p, 18, 3, 2, 2); CHECK(s.receive(p, sizeof(p), 4000));
-  status(s, 4119, 2, 170); status(s, 4120, 2, 0); status(s, 4240, 2, 170);
-  status(s, 4359, 2, 170); status(s, 4360, 2, 0);
+  status(s, 4119, 2, 170); status(s, 4120, 2, 170); status(s, 4240, 2, 0);
+  status(s, 4359, 2, 0); status(s, 4360, 2, 0);
   for (uint16_t seq = 19; seq < 50; ++seq) {
     const uint32_t now = 4400U + 100U*(seq-19U);
     command(p, seq, 3, 2, 2); CHECK(s.receive(p, sizeof(p), now));
-    status(s, now, 2, 0);
+    status(s, now, 2, ((now - 4000U) % 400U < 200U) ? 170 : 0);
   }
   // Sequence replay stops, but cannot roll back the accepted sequence.
   CHECK(!s.receive(p, sizeof(p), 7500)); status(s, 7500, 2, 0, false);

@@ -118,6 +118,17 @@ class GeometryTests(unittest.TestCase):
         self.assertIsNone(m.update(hand(), box_at(0.15, 0.55), 1.2, 1.21, (640, 640)))
         self.assertIsNone(m.update(hand(), box_at(0.85, 0.55), 1.3, 1.3, (640, 640)))
 
+    def test_direction_votes_keep_confirmed_guidance_with_current_valid_hand(self):
+        m = Mapper(mode=3, stable_frames=3)
+        for t in (1, 1.1, 1.2):
+            record = m.update(hand(), box_at(0.15, 0.55), t, t, (640, 640))
+        channel = record.cue.channel
+        for t in (1.3, 1.4):
+            current = m.update(hand(), box_at(0.85, 0.55), t, t, (640, 640))
+            self.assertEqual(current.cue.channel, channel)
+            self.assertEqual(current.captured_at, t)
+        self.assertNotEqual(m.update(hand(), box_at(0.85, 0.55), 1.5, 1.5, (640, 640)).cue.channel, channel)
+
     def test_hysteresis_and_freshness(self):
         m = Mapper()
         m.zone = Zone.NEAR
@@ -465,7 +476,7 @@ class AsyncTests(unittest.IsolatedAsyncioTestCase):
 
         client = FakeClient()
         client.connect = AsyncMock()
-        client.read_gatt_char = AsyncMock(return_value=PACKET.pack(2, 17, 0, 0, 2, 0, 1, 0, 0, 0, 0, 0, 0, 3))
+        client.read_gatt_char = AsyncMock(return_value=PACKET.pack(2, 17, 0, 0, 2, 0, 1, 0, 0, 0, 0, 0, 0, 7))
 
         async def find(predicate, timeout):
             self.assertFalse(
@@ -495,7 +506,7 @@ class AsyncTests(unittest.IsolatedAsyncioTestCase):
 
         client.write_gatt_char = first_write
         client.connect = AsyncMock()
-        client.read_gatt_char = AsyncMock(return_value=PACKET.pack(2, 17, 0, 0, 2, 0, 1, 0, 0, 0, 0, 0, 0, 3))
+        client.read_gatt_char = AsyncMock(return_value=PACKET.pack(2, 17, 0, 0, 2, 0, 1, 0, 0, 0, 0, 0, 0, 7))
         module = SimpleNamespace(
             BleakClient=lambda *a, **kw: client,
             BleakScanner=SimpleNamespace(
@@ -577,7 +588,7 @@ class AsyncTests(unittest.IsolatedAsyncioTestCase):
 
         client = FakeClient()
         client.connect = AsyncMock()
-        client.read_gatt_char = AsyncMock(return_value=PACKET.pack(2, 17, 0, 0, 2, 0, 1, 0, 0, 0, 0, 0, 0, 3))
+        client.read_gatt_char = AsyncMock(return_value=PACKET.pack(2, 17, 0, 0, 2, 0, 1, 0, 0, 0, 0, 0, 0, 7))
         module = SimpleNamespace(
             BleakClient=lambda *a, **kw: client,
             BleakScanner=SimpleNamespace(
@@ -813,7 +824,7 @@ class FirmwareParityTests(unittest.TestCase):
                         lib.v2_status(now, out)
                         actual = Status.decode(bytes(out))
                         on = (
-                            (now < 120 or 240 <= now < 360)
+                            (now % 400 < 200)
                             if mode == 3 and zone == Zone.NEAR
                             else now % (1200, 700, 400)[zone] < 200
                         )

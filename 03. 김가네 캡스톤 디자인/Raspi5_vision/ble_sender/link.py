@@ -58,8 +58,8 @@ class Link:
             stage = "초기 상태 읽기"
             print(f"BLE {stage} 중 | 제한={STARTUP_IO_TIMEOUT}초", flush=True)
             status = await self.status(timeout=STARTUP_IO_TIMEOUT)
-            if status.capabilities != 3:
-                raise RuntimeError("ESP 펌웨어 업데이트 필요: ble_final_receiver를 다시 업로드하세요 (다섯 채널/도달 알림 미지원).")
+            if status.capabilities != 7:
+                raise RuntimeError(f"ESP 펌웨어 업데이트 필요: capability={status.capabilities:#04x}, 필요=0x07. ble_final_receiver를 다시 업로드하세요 (350ms 획득 알림/반복 근접 안내).")
             print(
                 "BLE 연결 | " + ("ESP DRY_RUN: 실제 모터 출력 없음" if status.flags & 16 else "실제 모터 출력 가능"),
                 flush=True,
@@ -89,7 +89,7 @@ class Link:
     async def _write(self, cue, timeout):
         if self.client is None or not self.client.is_connected:
             raise ConnectionError("BLE 연결이 끊어졌습니다.")
-        data = encode(self.sequence, cue)
+        data = encode(self.sequence, cue, ttl_ms=1000 if cue is not None and cue.arrival_id is not None else 500)
         self.last_operation = (
             f"명령 쓰기 seq={self.sequence} STOP"
             if cue is None

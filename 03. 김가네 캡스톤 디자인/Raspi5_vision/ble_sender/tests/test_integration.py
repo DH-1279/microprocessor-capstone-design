@@ -256,6 +256,25 @@ def replay(rows, *, real_runtime=False, fail_audio=False, mode=3):
 
 
 class DetectorLoopTests(unittest.TestCase):
+    def test_locked_occluded_target_can_be_acquired_by_palm_center(self):
+        near = [SimpleNamespace(x=0.15 + (p.x - 0.51) * 0.5, y=0.55 + (p.y - 0.536) * 0.5)
+                for p in landmarks()]
+        rows = [{"text": "캡스톤"}, {"text": "컵"}]
+        rows += [{"points": near, "objects": []} for _ in range(7)] + [{}]
+        run = replay(rows, mode=3)
+        self.assertEqual(run.code, 0, run.log)
+        self.assertIn("LOCKED", run.log)
+        events = [r for r in run.bridge.sent if r and r.get("event") == "arrival"]
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["target_box"], CUP.box)
+        self.assertLess(events[0]["target_seen_at"], events[0]["captured_at"])
+        self.assertEqual(run.states[-1], "WAIT_WAKE")
+
+    def test_occlusion_does_not_release_lock_or_stop_valid_hand_guidance(self):
+        run = replay([{"text": "캡스톤"}, {"text": "컵"}] + [{"objects": []} for _ in range(55)])
+        self.assertEqual(run.code, 0, run.log)
+        self.assertEqual(run.states[-1], "SEARCHING")
+        self.assertTrue(all(r is not None for r in run.bridge.sent[1:-2]))
     def test_real_udp_arrival_is_not_cut_off_by_wait_wake_idle(self):
         sent = []
 
@@ -274,19 +293,19 @@ class DetectorLoopTests(unittest.TestCase):
                 await self.send(None)
 
         near = landmarks()
-        near[8] = SimpleNamespace(x=0.15, y=0.55)
+        near = [SimpleNamespace(x=0.15 + (p.x - 0.51) * 0.5, y=0.55 + (p.y - 0.536) * 0.5) for p in near]
         rows = [{"text": "캡스톤"}, {"text": "컵"}]
         rows += [{"points": near} for _ in range(16)] + [{} for _ in range(16)]
         with patch("ble_sender.cli.Link", FakeLink):
-            run = replay(rows, real_runtime=True, mode=2)
+            run = replay(rows, real_runtime=True, mode=3)
         self.assertEqual(run.code, 0, run.log)
         events = [(t, cue) for t, cue in sent if cue is not None and cue.arrival_id is not None]
         self.assertGreaterEqual(len(events), 2)
         self.assertEqual(len({cue.arrival_id for _, cue in events}), 1)
         start = events[0][0]
-        self.assertFalse(any(cue is None and start < t < start + 0.45 for t, cue in sent))
-        self.assertTrue(any(cue is not None and cue.zones is not None for _, cue in sent))
-        self.assertTrue(any("도달했습니다" in text for text in run.spoken))
+        self.assertFalse(any(cue is None and start < t < start + 0.9 for t, cue in sent))
+        self.assertTrue(any(cue is not None and cue.mode == 3 and cue.arrival_id is None for _, cue in sent))
+        self.assertTrue(any("획득했습니다" in text for text in run.spoken))
     def test_wake_lock_cancel_and_relock_use_current_frame_and_new_lock_id(self):
         run = replay(
             [
@@ -328,7 +347,7 @@ class DetectorLoopTests(unittest.TestCase):
         self.assertTrue(all(call.kwargs["timeout"] == 2 for call in run.volume_calls))
 
     def test_lost_held_stale_hand_or_missing_target_send_stop(self):
-        for invalid in ({"valid": False}, {"valid": False, "held": True}, {"age": 1}, {"objects": []}):
+        for invalid in ({"valid": False}, {"valid": False, "held": True}, {"age": 1}):
             run = replay([{"text": "캡스톤"}, {"text": "컵"}, invalid])
             records = run.bridge.sent
             self.assertIsNotNone(records[1])
@@ -337,9 +356,9 @@ class DetectorLoopTests(unittest.TestCase):
 
     def test_arrival_emits_event_before_return_to_wake(self):
         near = landmarks()
-        near[8] = SimpleNamespace(x=0.15, y=0.55)
+        near = [SimpleNamespace(x=0.15 + (p.x - 0.51) * 0.5, y=0.55 + (p.y - 0.536) * 0.5) for p in near]
         run = replay([{"text": "캡스톤"}, {"text": "컵"}] + [{"points": near} for _ in range(9)] + [{}])
-        self.assertTrue(any("도달했습니다" in text for text in run.spoken))
+        self.assertTrue(any("획득했습니다" in text for text in run.spoken))
         self.assertEqual(sum(r is not None and r.get("event") == "arrival" for r in run.bridge.sent), 1)
         self.assertEqual(run.states[-1], "WAIT_WAKE")
         self.assertTrue(all(record is None for record in run.bridge.sent[-3:]))

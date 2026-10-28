@@ -13,13 +13,25 @@ BOX = (0.35, 0.25, 0.45, 0.35)  # Index fingertip is inside.
 
 
 class ArrivalTests(unittest.TestCase):
-    def test_time_same_finger_inner_box_and_once_per_lock(self):
+    def test_edge_on_palm_can_complete_without_direction_basis(self):
+        points = hand()
+        points[0] = (0.5, 0.5)  # Wrist/knuckles collinear: direction mapper rejects.
+        box = (0.46, 0.446, 0.56, 0.546)
         gate = ArrivalGate()
+        for n in range(4):
+            self.assertFalse(gate.update("a", points, box, 1 + n/10, 1 + n/10, (640, 640)))
+        self.assertTrue(gate.update("a", points, box, 1.4, 1.4, (640, 640)))
+        c = Controller(mode=3, clock=lambda: 0)
+        self.assertTrue(c.receive(packet(1, captured=1.4, landmarks=points, target_box=box, event="arrival"), now=1.4))
+        self.assertIsNotNone(c.cue(now=1.4).arrival_id)
+    def test_palm_center_five_frames_and_once_per_lock(self):
+        gate = ArrivalGate()
+        box = (0.46, 0.486, 0.56, 0.586)
         for t in (1, 1.1, 1.2, 1.3):
-            self.assertFalse(gate.update("a", hand(), BOX, t, t, (640, 640)))
-        self.assertTrue(gate.update("a", hand(), BOX, 1.41, 1.41, (640, 640)))
-        self.assertFalse(gate.update("a", hand(), BOX, 1.5, 1.5, (640, 640)))
-        self.assertFalse(gate.update("b", hand(), BOX, 1.6, 1.6, (640, 640)))
+            self.assertFalse(gate.update("a", hand(), box, t, t, (640, 640), target_seen_at=1))
+        self.assertTrue(gate.update("a", hand(), box, 1.41, 1.41, (640, 640), target_seen_at=1))
+        self.assertFalse(gate.update("a", hand(), box, 1.5, 1.5, (640, 640)))
+        self.assertFalse(gate.update("b", hand(), box, 1.6, 1.6, (640, 640)))
 
     def test_loss_stale_and_brief_border_overlap_never_complete(self):
         for invalid in (None, "stale", "border"):
@@ -28,7 +40,7 @@ class ArrivalTests(unittest.TestCase):
             for t in (1.1, 1.2, 1.3, 1.41, 1.5):
                 points = hand()
                 if invalid == "border":
-                    points[8] = (0.35, 0.3)
+                    points[8] = (0.35, 0.3)  # A fingertip alone is not a palm overlap.
                 box = None if invalid is None else BOX
                 self.assertFalse(gate.update("a", points, box, t, t + (1 if invalid == "stale" else 0), (640, 640)))
 
@@ -53,7 +65,7 @@ class ArrivalTests(unittest.TestCase):
         clock[0] = 1.5
         self.assertEqual(c.cue(), event)
         c.receive(packet(3, captured=1.5, event="arrival", target_box=BOX))
-        self.assertEqual(c.arrival_until, 2.5)  # Duplicate did not extend deadline.
+        self.assertEqual(c.arrival_until, 2.9)  # Duplicate did not extend deadline.
         c.command("stop")
         self.assertIsNone(c.cue())
         c.command("resume")
@@ -67,7 +79,19 @@ class ArrivalTests(unittest.TestCase):
         self.assertIsNone(c.cue(now=2))
         c.receive(packet(2, captured=2, event="arrival"), now=2)
         self.assertIsNotNone(c.cue(now=2.1))
-        self.assertIsNone(c.cue(now=3.51))
+        self.assertIsNone(c.cue(now=3.91))
+
+    def test_locked_target_keeps_original_timestamp_until_cancel(self):
+        c = Controller(mode=3, clock=lambda: 0, stable_frames=1)
+        self.assertTrue(c.receive(packet(1, captured=1, target_seen_at=1), now=1))
+        self.assertTrue(c.receive(packet(2, captured=2, target_seen_at=1), now=2))
+        self.assertIsNotNone(c.cue(now=2))
+        self.assertIn("잠금", c.reason)
+        self.assertTrue(c.receive(packet(3, captured=40.1, target_seen_at=1), now=40.1))
+        self.assertIsNotNone(c.cue(now=40.1))
+        c.command("stop")
+        self.assertIsNone(c.cue(now=40.1))
+        self.assertFalse(c.receive(packet(4, captured=40.2, target_seen_at=41), now=40.2))
 
     def test_multi_mapper_encodes_different_distances_and_overlap_keeps_near(self):
         mapper = Mapper(mode=2, multi_rate=True, stable_frames=1)
@@ -111,18 +135,18 @@ class NativeMultiTests(unittest.TestCase):
 
     def test_maximum_double_tap_once_even_after_refresh_stop_and_expiry(self):
         cue = Cue(2, 2, 1, (255,) * 5, arrival_id=10)
-        self.send(cue, 0)
-        for t, duty in ((0, 255), (149, 255), (150, 0), (299, 0), (300, 255), (449, 255), (450, 0)):
+        self.send(cue, 0, ttl=1000)
+        for t, duty in ((0, 255), (349, 255), (350, 0), (549, 0), (550, 255), (899, 255), (900, 0)):
             self.assertEqual(self.status(t).duties, (duty,) * 5)
-        self.send(cue, 460)
-        self.assertEqual(self.status(460).duties, (0,) * 5)
-        self.send(None, 470)
-        self.send(cue, 480)
-        self.assertEqual(self.status(480).duties, (0,) * 5)
-        self.send(Cue(2, 2, 1, (255,) * 5, arrival_id=11), 500)
-        self.assertEqual(self.status(500).duties, (255,) * 5)
-        self.send(None, 510)
-        self.assertEqual(self.status(510).duties, (0,) * 5)
+        self.send(cue, 910)
+        self.assertEqual(self.status(910).duties, (0,) * 5)
+        self.send(None, 920)
+        self.send(cue, 930)
+        self.assertEqual(self.status(930).duties, (0,) * 5)
+        self.send(Cue(2, 2, 1, (255,) * 5, arrival_id=11), 950)
+        self.assertEqual(self.status(950).duties, (255,) * 5)
+        self.send(None, 960)
+        self.assertEqual(self.status(960).duties, (0,) * 5)
 
     def test_arrival_ttl_cannot_reenergize_on_late_same_event(self):
         cue = Cue(3, 2, 2, (255,) * 5, arrival_id=1)
@@ -130,4 +154,12 @@ class NativeMultiTests(unittest.TestCase):
         self.assertEqual(self.status(100).duties, (0,) * 5)
         self.send(cue, 110)
         self.assertEqual(self.status(110).duties, (0,) * 5)
-        self.assertEqual(self.status(110).capabilities, 3)
+        self.assertEqual(self.status(110).capabilities, 7)
+
+    def test_mode3_near_repeats_until_stop(self):
+        cue = Cue(3, 2, 2)
+        for t, expected in ((0, 180), (199, 180), (200, 0), (400, 180), (600, 0), (800, 180)):
+            self.send(cue, t)
+            self.assertEqual(self.status(t).duties, (0, 0, expected, 0, 0))
+        self.send(None, 850)
+        self.assertEqual(self.status(850).duties, (0,) * 5)

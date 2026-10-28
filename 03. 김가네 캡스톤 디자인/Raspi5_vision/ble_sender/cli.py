@@ -250,7 +250,7 @@ async def run(args, *, ready=None, stop_requested=None, on_fault=None):
 
 def parser():
     p = argparse.ArgumentParser(description="김가네 왼손 장갑 BLE v2 송신부")
-    p.add_argument("--mode", type=int, choices=(2, 3), default=2)
+    p.add_argument("--mode", type=int, choices=(2, 3), default=3)
     p.add_argument("--address", help="ESP BLE 주소. 생략하면 이름/서비스로 검색")
     p.add_argument("--scan-timeout", type=float, default=10, help="BLE 검색 제한(초), 기본 10")
     p.add_argument("--connect-timeout", type=float, default=30, help="연결·서비스 확인 제한(초), 기본 30")
