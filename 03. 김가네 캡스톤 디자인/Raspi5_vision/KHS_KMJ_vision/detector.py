@@ -385,10 +385,10 @@ def main():
                         else:
                             reach_frame_count = 0
 
-                        # (4) 손이 목표 물건에 도달할 때까지 진행 후 완료 처리
+                        # (4) 손이 목표 물건에 도달할 때까지 진행 후 완료 처리 (찾은 경우 시동어 대기 상태로 복귀)
                         if reach_frame_count >= REQUIRED_REACH_FRAMES:
                             print(f"✨ [획득 성공!] {target_kor}을(를) 집어 들었습니다! ({reach_frame_count}프레임 연속 도달)")
-                            audio_service.say(f"{target_kor}을(를) 찾았습니다.")
+                            # 물건을 찾은 후 시동어를 다시 말하도록 대기 상태(WAIT_WAKE)로 전환
                             state = "WAIT_WAKE"
                             target_eng_label = None
                             locked_target_box = None
@@ -396,6 +396,7 @@ def main():
                             missing_frame_count = 0
                             reach_frame_count = 0
                             no_hand_since = None
+                            audio_service.say(f"{target_kor}을 찾았습니다. 다른 물건을 찾으려면 캡스톤을 말씀해주세요.")
                             continue
 
                         if found_target is None and not hand_near_target and missing_frame_count > 45:
