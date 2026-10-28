@@ -310,21 +310,23 @@ class AsyncTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_udp_publisher_to_real_async_inbox(self):
         loop = asyncio.get_running_loop()
-        c, changed = Controller(stable_frames=1), asyncio.Event()
+        clock = [time.monotonic()]
+        c, changed = Controller(stable_frames=1, clock=lambda: clock[0]), asyncio.Event()
         transport, _ = await loop.create_datagram_endpoint(lambda: Inbox(c, changed), local_addr=("127.0.0.1", 0))
         port = transport.get_extra_info("sockname")[1]
         try:
             with VisionPublisher(port) as publisher:
+                clock[0] += 1
                 publisher.publish(
                     target_id="test",
                     frame_id=1,
-                    captured_at=time.monotonic(),
+                    captured_at=clock[0],
                     size=(640, 640),
                     landmarks=hand(),
                     target_box=box_at(0.15, 0.55),
                 )
                 await asyncio.wait_for(changed.wait(), 1)
-                self.assertIsNotNone(c.cue())
+                self.assertIsNotNone(c.cue(), c.reason)
                 changed.clear()
                 publisher.stop()
                 await asyncio.wait_for(changed.wait(), 1)
