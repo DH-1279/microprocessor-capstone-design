@@ -391,6 +391,7 @@ class HandTracker:
         self.last_frame_id: int | None = None
         self.last_result = None
         self.last_landmarks = None
+        self.last_observed_landmarks = None
 
     def __enter__(self):
         import mediapipe as mp
@@ -416,6 +417,7 @@ class HandTracker:
         the module refuse a frame it has already answered. Parallel inference
         must not mix results from different frames.
         """
+        self.last_observed_landmarks = None
         if frame_id is not None:
             if self.last_frame_id is not None and frame_id <= self.last_frame_id:
                 raise ValueError(
@@ -435,6 +437,15 @@ class HandTracker:
         raw = select_for_vote(result, self.selected, self.threshold,
                               self.worn_hand)
         self.last_result = self.stabilizer.update(raw, captured_at)
+        # BLE requires this frame's single accepted hand, never a held point
+        # or the first raw hand from an ambiguous multi-hand result.
+        if (raw is not None and self.last_result is not None
+                and raw.score >= self.stabilizer.config["min_score"]
+                and len(result.hand_landmarks) == len(result.handedness) == 1):
+            landmarks = result.hand_landmarks[0]
+            if all(math.isfinite(float(value)) and 0 <= float(value) <= 1
+                   for point in landmarks for value in (point.x, point.y)):
+                self.last_observed_landmarks = landmarks
         return self.last_result
 
     def last(self):
@@ -447,6 +458,7 @@ class HandTracker:
     def reset(self) -> None:
         self.stabilizer.reset()
         self.last_result = None
+        self.last_observed_landmarks = None
 
     def __exit__(self, *args):
         self.tracker.close()

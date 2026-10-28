@@ -5,13 +5,14 @@ import math
 import queue
 import time
 import traceback
+import uuid
 from pathlib import Path
 
 # PortAudio(sounddevice)가 hw 대신 plughw를 사용하도록 강제
 os.environ["PA_ALSA_PLUGHW"] = "1"
 
 # 1. 모듈 임포트를 위한 최상위 경로 추가
-PROJECT_ROOT = "/home/dh1279/Desktop/kimGA_raspi/microprocessor-capstone-design/03. 김가네 캡스톤 디자인/Raspi5_vision"
+PROJECT_ROOT = str(Path(__file__).resolve().parents[1])
 sys.path.append(PROJECT_ROOT)
 
 import haptic_mvp.vision
@@ -20,6 +21,7 @@ from haptic_mvp.models import Detection
 from hand_tracker import HandTracker, draw_hand
 from audio import AudioService
 import speech  # 문법 및 자모 편집 거리 기반 음성 파서
+from ble_sender.integration import DetectorBLE, detector_arguments
 
 # ==========================================
 # [긴급 패치 1] HailoRT physical.identify().device_architecture 우회
@@ -167,7 +169,9 @@ def put_readable_text(img, text, pos, font_scale=0.5, text_color=(20, 20, 20), o
     cv2.putText(img, text, pos, cv2.FONT_HERSHEY_SIMPLEX, font_scale, outline_color, thickness + 2, cv2.LINE_AA)
     cv2.putText(img, text, pos, cv2.FONT_HERSHEY_SIMPLEX, font_scale, text_color, thickness, cv2.LINE_AA)
 
-def main():
+def main(argv=None):
+    arguments = detector_arguments(argv)
+    ble = DetectorBLE(arguments)
     config = {
         "object_model": HEF_PATH,
         "labels_file": LABELS_PATH,
@@ -177,7 +181,7 @@ def main():
         
         "hand_model": HAND_MODEL_PATH,
         "hand": "Any",
-        "worn_hand": "Any",
+        "worn_hand": "Left",
         "hand_score_threshold": 0.5,
         
         "source": "picamera2", 
@@ -190,7 +194,7 @@ def main():
     audio_config = {
         "enabled": True,
         "whisper_executable": "/home/dh1279/Desktop/kimGA_raspi/whisper.cpp/build/bin/whisper-cli",
-        "whisper_model": "/home/dh1279/Desktop/kimGA_raspi/microprocessor-capstone-design/03. 김가네 캡스톤 디자인/Raspi5_vision/models/ggml-tiny.bin",
+        "whisper_model": str(Path(PROJECT_ROOT) / "models" / "ggml-tiny.bin"),
         "tts_executable": "/usr/bin/espeak-ng",
         "playback_executable": "/usr/bin/aplay",
         "tts_voice": "M1",  # Supertonic 보이스 스타일 (M1, F1 등)
@@ -201,13 +205,10 @@ def main():
 
     command_queue = queue.Queue()
     audio_service = AudioService(audio_config, on_text=command_queue.put_nowait)
-    audio_service.start()
-
-    print("초기화 완료. 시동어 '캡스톤'을 기다리는 중...")
-    audio_service.say("시스템이 준비되었습니다. 캡스톤이라고 말씀해주세요.")
-
     state = "WAIT_WAKE"
     target_eng_label = None
+    lock_id = None
+    frame_id = 0
     
     locked_target_box = None     
     locked_center = None         
@@ -219,6 +220,10 @@ def main():
     tip_names = ("엄지", "검지", "중지", "약지", "새끼")
 
     try:
+        ble.start()
+        audio_service.start()
+        print("초기화 완료. 시동어 '캡스톤'을 기다리는 중...")
+        audio_service.say("시스템이 준비되었습니다. 캡스톤이라고 말씀해주세요.")
         with CameraSource(config) as cam, \
              HailoDetector(config) as detector, \
              HandTracker(config) as tracker:
@@ -228,15 +233,24 @@ def main():
             cv2.moveWindow(window_name, 50, 50)
             
             while True:
+                if not ble.check():
+                    print("BLE 터미널 종료 요청: 전체 프로그램을 종료합니다.")
+                    break
                 read_result = cam.read()
                 if read_result is None:
+                    ble.stop()
                     print("프레임을 읽어올 수 없습니다.")
                     break
                     
                 frame, timestamp = read_result
+                frame_id += 1
                 
                 obj_detections = detector.detect(frame)
                 hand_result = tracker.detect(frame, timestamp)
+                frame_fresh = 0 <= time.monotonic() - timestamp <= arguments.max_age
+                landmarks = (tracker.last_observed_landmarks
+                             if hand_result is not None and frame_fresh else None)
+                found_target = None
 
                 display_frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
                 height, width = display_frame.shape[:2]
@@ -267,6 +281,7 @@ def main():
                             matched = intent.name
                             if matched in current_detected_labels:
                                 target_eng_label = matched
+                                lock_id = uuid.uuid4().hex
                                 state = "SEARCHING"
                                 target_kor = get_korean_name(matched)
                                 
@@ -306,6 +321,7 @@ def main():
                         if intent.kind == "control":
                             # (5) 추적 중간에 "취소" 등의 명령 시 안내 종료 후 (2)번 상태(WAIT_TARGET)로 복귀하여 다시 멘트
                             if intent.name == "stop":
+                                ble.stop()
                                 print("⏹️ 사용자 요청으로 안내를 종료하고 물건 선택 단계로 복귀합니다.")
                                 state = "WAIT_TARGET"
                                 target_eng_label = None
@@ -340,7 +356,6 @@ def main():
                                 found_target = closest_det
 
                     target_kor = get_korean_name(target_eng_label)
-                    landmarks = getattr(tracker, "last_landmarks", None)
                     hand_near_target = False
 
                     # 손 인식 여부에 따른 5초 주기 안내 타이머 처리
@@ -365,7 +380,7 @@ def main():
                     if locked_center is not None:
                         center_x, center_y = locked_center
 
-                        if landmarks is not None:
+                        if landmarks is not None and found_target is not None:
                             hand_cx = int(landmarks[9].x * width)
                             hand_cy = int(landmarks[9].y * height)
                             if math.hypot(center_x - hand_cx, center_y - hand_cy) < REACH_THRESHOLD:
@@ -378,6 +393,7 @@ def main():
 
                         # (4) 손이 목표 물건에 도달할 때까지 진행 후 완료 처리
                         if reach_frame_count >= REQUIRED_REACH_FRAMES:
+                            ble.stop()
                             print(f"✨ [획득 성공!] {target_kor}을(를) 집어 들었습니다! ({reach_frame_count}프레임 연속 도달)")
                             audio_service.say(f"{target_kor}을(를) 찾았습니다.")
                             state = "WAIT_WAKE"
@@ -390,6 +406,7 @@ def main():
                             continue
 
                         if found_target is None and not hand_near_target and missing_frame_count > 45:
+                            ble.stop()
                             print(f"⚠️ {target_kor}을(를) 장시간 찾을 수 없어 타겟을 해제합니다.")
                             audio_service.say("물건을 찾을 수 없습니다. 다시 말씀해 주세요.")
                             state = "WAIT_TARGET"
@@ -431,6 +448,17 @@ def main():
                             print("    └ 🖐️ 손이 감지되지 않았습니다.")
                     else:
                         print(f"⚠️ {target_kor}의 위치를 찾을 수 없습니다.")
+
+                ble.publish(
+                    active=(state == "SEARCHING" and found_target is not None
+                            and landmarks is not None),
+                    target_id=lock_id,
+                    frame_id=frame_id,
+                    captured_at=timestamp,
+                    size=(width, height),
+                    landmarks=landmarks,
+                    target_box=found_target.box if found_target is not None else None,
+                )
 
                 if obj_detections:
                     base_y = height - 20
@@ -486,9 +514,14 @@ def main():
     except Exception as e:
         print(f"실행 중 에러가 발생했습니다: {e}")
         traceback.print_exc()
+        return 1
     finally:
-        audio_service.close()
-        cv2.destroyAllWindows()
+        try:
+            ble.close()
+        finally:
+            audio_service.close()
+            cv2.destroyAllWindows()
+    return 0
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

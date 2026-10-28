@@ -120,7 +120,7 @@ async def transmit(controller, link, commands, changed, finished, *, interval=0.
             pass
 
 
-async def run(args):
+async def run(args, *, ready=None, stop_requested=None):
     loop = asyncio.get_running_loop()
     changed, finished = asyncio.Event(), asyncio.Event()
     controller = Controller(
@@ -154,6 +154,17 @@ async def run(args):
             installed_signals.append(signum)
         except (NotImplementedError, RuntimeError):
             pass
+
+    owner = asyncio.current_task()
+
+    async def watch_owner():
+        while True:
+            if stop_requested.is_set():
+                owner.cancel()  # Also cancel a scan/connect during startup.
+                return
+            await asyncio.sleep(0.05)
+
+    watcher = asyncio.create_task(watch_owner()) if stop_requested is not None else None
     try:
         async with ConsoleLink() if args.dry_run else Link(args.address) as link:
             print(f"영상 입력: {HOST}:{args.port} | mode={args.mode} | 왼손 장갑", flush=True)
@@ -162,8 +173,13 @@ async def run(args):
                 print("독립 시험 허용: test far in 2 (2안), test middle th 2 (3안)", flush=True)
             if not args.no_console:
                 close_console = start_console(loop, commands, changed)
+            if ready is not None:
+                ready.set()  # Only after connection, initial STOP and status validation.
             await transmit(controller, link, commands, changed, finished, reply=lambda s: print(s, flush=True))
     finally:
+        if watcher is not None:
+            watcher.cancel()
+            await asyncio.gather(watcher, return_exceptions=True)
         close_console()
         transport.close()
         for signum in installed_signals:

@@ -1,6 +1,6 @@
 # Raspberry Pi BLE v2 송신부
 
-시동어·STT·TTS·카메라와 분리된 송신 프로세스다. ESP의 `ble_final_receiver`용이며 기존 `haptic_mvp` BLE v1과 함께 사용하지 않는다.
+ESP의 `ble_final_receiver`용 송신부다. `KHS_KMJ_vision/detector.py`를 실행하면 내부 BLE 작업도 자동 시작한다. 기존 `haptic_mvp` BLE v1과 함께 사용하지 않는다.
 
 - [설치·실행·해수 코드 연결 방법](../../docs/2026-10-28_DH_라즈베리_BLE_송신부.md)
 - [ESP32 16바이트 규격](../../docs/2026-10-27_DH_ESP32_BLE_송수신규격.md)
@@ -10,7 +10,7 @@
 ```bash
 source .venv/bin/activate
 python -m pip install -r ble_sender/requirements.txt
-python -m ble_sender --mode 2
+python -u KHS_KMJ_vision/detector.py --mode 2
 ```
 
 실행 중 터미널 명령:
@@ -24,7 +24,9 @@ resume
 quit
 ```
 
-영상 프로그램이 `VisionPublisher`로 관측을 넘기기 전까지 정지 상태로 기다린다. 기존 `KHS_KMJ_vision/detector.py`에 자동 연결되어 있지는 않다. 독립 모터 시험은 `--allow-test`, BLE 없는 송신부 시험은 `--dry-run`을 사용한다. 자세한 예제는 위 문서에 있다.
+ESP 연결 후 시동어·목표 선택을 기다리며, 락온한 목표와 이번 프레임의 유효한 손이 있을 때만 안내한다. 취소·도달·상실·종료 때 정지한다. `quit`는 BLE와 detector를 함께 종료한다.
+
+`--dry-run`은 BLE 없이 영상과 패킷 매핑을 검사하고, `--no-ble`은 영상·음성만 실행한다. ESP의 `DRY_RUN` 펌웨어 설정과는 다르다. 독립 모터 시험은 `python -m ble_sender --allow-test`로 가능하며, detector와 동시에 켜지 않는다.
 
 ```bash
 python -m unittest discover -s ble_sender/tests -v
