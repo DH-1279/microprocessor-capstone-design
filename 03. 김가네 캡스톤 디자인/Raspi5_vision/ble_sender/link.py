@@ -7,6 +7,14 @@ import math
 from .protocol import COMMAND, NAME, SERVICE, STATUS, Status, encode
 
 logger = logging.getLogger(__name__)
+CONNECT_GRACE = 2
+STARTUP_IO_TIMEOUT = 5
+ACTIVE_WRITE_TIMEOUT = 0.3
+DISCONNECT_TIMEOUT = 3
+
+
+def startup_budget(scan_timeout, connect_timeout):
+    return scan_timeout + connect_timeout + CONNECT_GRACE + 2 * STARTUP_IO_TIMEOUT + DISCONNECT_TIMEOUT + 2
 
 
 class Link:
@@ -36,12 +44,16 @@ class Link:
             print(f"BLE {stage} 중 | 제한={self.connect_timeout:g}초", flush=True)
             # Allow BlueZ/Bleak's own timeout to clean up first. The outer
             # deadline only bounds a backend that does not return on time.
-            await asyncio.wait_for(self.client.connect(), self.connect_timeout + 2)
+            await asyncio.wait_for(self.client.connect(), self.connect_timeout + CONNECT_GRACE)
             print("BLE 연결·서비스 확인 완료", flush=True)
             stage = "초기 STOP 전송"
-            await self.send(None)
+            print(f"BLE {stage} 중 | 제한={STARTUP_IO_TIMEOUT}초", flush=True)
+            # Initial STOP cannot energize a motor, so allow first-ATT setup
+            # latency without relaxing the deadline for live guidance writes.
+            await self._write(None, STARTUP_IO_TIMEOUT)
             stage = "초기 상태 읽기"
-            status = await self.status()
+            print(f"BLE {stage} 중 | 제한={STARTUP_IO_TIMEOUT}초", flush=True)
+            status = await self.status(timeout=STARTUP_IO_TIMEOUT)
             print(
                 "BLE 연결 | " + ("ESP DRY_RUN: 실제 모터 출력 없음" if status.flags & 16 else "실제 모터 출력 가능"),
                 flush=True,
@@ -49,7 +61,9 @@ class Link:
             return self
         except BaseException as error:
             try:
-                await self.close()
+                # Startup sent only STOP. After an ATT timeout, disconnect
+                # instead of queueing another write on the stalled transaction.
+                await self.close(send_stop=False)
             except Exception:
                 logger.exception("BLE cleanup failed after startup error")
             if isinstance(error, TimeoutError):
@@ -64,28 +78,31 @@ class Link:
             raise
 
     async def send(self, cue):
+        await self._write(cue, ACTIVE_WRITE_TIMEOUT)
+
+    async def _write(self, cue, timeout):
         if self.client is None or not self.client.is_connected:
             raise RuntimeError("BLE disconnected")
         data = encode(self.sequence, cue)
         self.sequence = (self.sequence + 1) & 65535
-        await asyncio.wait_for(self.client.write_gatt_char(COMMAND, data, response=True), 0.3)
+        await asyncio.wait_for(self.client.write_gatt_char(COMMAND, data, response=True), timeout)
 
-    async def status(self):
-        result = Status.decode(await asyncio.wait_for(self.client.read_gatt_char(STATUS), 2))
+    async def status(self, *, timeout=2):
+        result = Status.decode(await asyncio.wait_for(self.client.read_gatt_char(STATUS), timeout))
         if not result.flags & 1 or result.flags & (8 | 32):
             raise RuntimeError(f"ESP 연결/명령/하드웨어 오류: flags={result.flags:#x}")
         return result
 
-    async def close(self):
+    async def close(self, *, send_stop=True):
         if self.client is not None:
             try:
-                if self.client.is_connected:
+                if send_stop and self.client.is_connected:
                     await self.send(None)
             except Exception:
                 logger.exception("STOP write failed; ESP TTL is the fallback")
             finally:
                 try:
-                    await asyncio.wait_for(self.client.disconnect(), 3)
+                    await asyncio.wait_for(self.client.disconnect(), DISCONNECT_TIMEOUT)
                 finally:
                     self.client = None
 

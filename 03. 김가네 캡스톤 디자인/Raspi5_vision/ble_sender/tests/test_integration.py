@@ -362,7 +362,7 @@ class LifecycleTests(unittest.TestCase):
             patch("ble_sender.integration.VisionPublisher"),
         ):
             runtime.start()
-            runtime.ready.wait.assert_called_once_with(52)
+            runtime.ready.wait.assert_called_once_with(57)
             runtime.close()
 
     def test_empty_exception_still_reports_its_type(self):
