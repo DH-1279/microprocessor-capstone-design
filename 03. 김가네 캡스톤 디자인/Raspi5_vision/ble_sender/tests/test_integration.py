@@ -143,6 +143,9 @@ class BridgeProbe:
     def stop(self):
         self.sent.append(None)
 
+    def arrive(self, **observation):
+        self.sent.append(dict(event="arrival", **observation))
+
     def publish(self, *, active, **observation):
         self.sent.append(observation if active else None)
 
@@ -151,7 +154,7 @@ class BridgeProbe:
         self.closed = True
 
 
-def replay(rows, *, real_runtime=False, fail_audio=False):
+def replay(rows, *, real_runtime=False, fail_audio=False, mode=3):
     module = load_detector()
     position = [-1]
     clock = [0.0]
@@ -220,7 +223,7 @@ def replay(rows, *, real_runtime=False, fail_audio=False):
         if text.startswith("State: "):
             states.append(text.split(" | ")[0][7:])
 
-    argv = ["--no-console", "--stable-frames", "1", "--mode", "3"]
+    argv = ["--no-console", "--stable-frames", "1", "--mode", str(mode)]
     if real_runtime:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
             probe.bind(("127.0.0.1", 0))
@@ -253,6 +256,37 @@ def replay(rows, *, real_runtime=False, fail_audio=False):
 
 
 class DetectorLoopTests(unittest.TestCase):
+    def test_real_udp_arrival_is_not_cut_off_by_wait_wake_idle(self):
+        sent = []
+
+        class FakeLink:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def send(self, cue):
+                sent.append((time.monotonic(), cue))
+                encode(0, cue)
+
+            async def __aexit__(self, *args):
+                await self.send(None)
+
+        near = landmarks()
+        near[8] = SimpleNamespace(x=0.15, y=0.55)
+        rows = [{"text": "캡스톤"}, {"text": "컵"}]
+        rows += [{"points": near} for _ in range(16)] + [{} for _ in range(16)]
+        with patch("ble_sender.cli.Link", FakeLink):
+            run = replay(rows, real_runtime=True, mode=2)
+        self.assertEqual(run.code, 0, run.log)
+        events = [(t, cue) for t, cue in sent if cue is not None and cue.arrival_id is not None]
+        self.assertGreaterEqual(len(events), 2)
+        self.assertEqual(len({cue.arrival_id for _, cue in events}), 1)
+        start = events[0][0]
+        self.assertFalse(any(cue is None and start < t < start + 0.45 for t, cue in sent))
+        self.assertTrue(any(cue is not None and cue.zones is not None for _, cue in sent))
+        self.assertTrue(any("도달했습니다" in text for text in run.spoken))
     def test_wake_lock_cancel_and_relock_use_current_frame_and_new_lock_id(self):
         run = replay(
             [
@@ -301,11 +335,12 @@ class DetectorLoopTests(unittest.TestCase):
             self.assertIsNone(records[2])
             self.assertFalse(any("찾았습니다" in text for text in run.spoken))
 
-    def test_reach_sends_stop_before_return_to_wake(self):
+    def test_arrival_emits_event_before_return_to_wake(self):
         near = landmarks()
-        near[9] = SimpleNamespace(x=0.15, y=0.55)
-        run = replay([{"text": "캡스톤"}, {"text": "컵"}] + [{"points": near} for _ in range(5)] + [{}])
-        self.assertTrue(any("찾았습니다" in text for text in run.spoken))
+        near[8] = SimpleNamespace(x=0.15, y=0.55)
+        run = replay([{"text": "캡스톤"}, {"text": "컵"}] + [{"points": near} for _ in range(9)] + [{}])
+        self.assertTrue(any("도달했습니다" in text for text in run.spoken))
+        self.assertEqual(sum(r is not None and r.get("event") == "arrival" for r in run.bridge.sent), 1)
         self.assertEqual(run.states[-1], "WAIT_WAKE")
         self.assertTrue(all(record is None for record in run.bridge.sent[-3:]))
 

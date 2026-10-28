@@ -40,7 +40,7 @@ class VisionPublisher:
             # Missing updates expire at the receiver; there is no local backlog.
             return False
 
-    def publish(self, *, target_id, frame_id, captured_at, size, landmarks, target_box, observed=True):
+    def publish(self, *, target_id, frame_id, captured_at, size, landmarks, target_box, observed=True, event=None):
         """Call only in active guidance, with matched hand+target in ONE frame.
 
         target_id: unique per lock, not just a class name. frame_id must increase
@@ -59,7 +59,11 @@ class VisionPublisher:
             size=tuple(size),
             landmarks=points,
             target_box=tuple(target_box),
+            event=event,
         )
+
+    def idle(self):
+        return self._send(active=False, idle=True)
 
     def stop(self):
         """Call immediately on cancel, reach completion, loss or idle states."""

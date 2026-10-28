@@ -266,6 +266,19 @@ class FakeClient:
 
 
 class AsyncTests(unittest.IsolatedAsyncioTestCase):
+    async def test_old_firmware_is_blocked_before_any_motor_command(self):
+        client = FakeClient()
+        client.connect = AsyncMock()
+        client.read_gatt_char = AsyncMock(return_value=PACKET.pack(2, 17, 0, 0, 2, 0, 1, 0, 0, 0, 0, 0, 0, 0))
+        module = SimpleNamespace(BleakClient=Mock(return_value=client),
+                                 BleakScanner=SimpleNamespace(find_device_by_address=AsyncMock(return_value=object())))
+        with patch.dict(sys.modules, bleak=module), patch("builtins.print"):
+            with self.assertRaisesRegex(RuntimeError, "펌웨어 업데이트 필요"):
+                async with Link("test"):
+                    self.fail("old receiver must not start")
+        self.assertFalse(client.is_connected)
+        self.assertTrue(all(data[1] == 1 for _, data, _ in client.writes))
+
     async def test_fault_wait_requires_reconnect_and_keeps_resume_locked(self):
         c = Controller()
         commands, changed, finished = asyncio.Queue(), asyncio.Event(), asyncio.Event()
@@ -452,7 +465,7 @@ class AsyncTests(unittest.IsolatedAsyncioTestCase):
 
         client = FakeClient()
         client.connect = AsyncMock()
-        client.read_gatt_char = AsyncMock(return_value=PACKET.pack(2, 17, 0, 0, 2, 0, 1, 0, 0, 0, 0, 0, 0, 0))
+        client.read_gatt_char = AsyncMock(return_value=PACKET.pack(2, 17, 0, 0, 2, 0, 1, 0, 0, 0, 0, 0, 0, 3))
 
         async def find(predicate, timeout):
             self.assertFalse(
@@ -482,7 +495,7 @@ class AsyncTests(unittest.IsolatedAsyncioTestCase):
 
         client.write_gatt_char = first_write
         client.connect = AsyncMock()
-        client.read_gatt_char = AsyncMock(return_value=PACKET.pack(2, 17, 0, 0, 2, 0, 1, 0, 0, 0, 0, 0, 0, 0))
+        client.read_gatt_char = AsyncMock(return_value=PACKET.pack(2, 17, 0, 0, 2, 0, 1, 0, 0, 0, 0, 0, 0, 3))
         module = SimpleNamespace(
             BleakClient=lambda *a, **kw: client,
             BleakScanner=SimpleNamespace(
@@ -564,7 +577,7 @@ class AsyncTests(unittest.IsolatedAsyncioTestCase):
 
         client = FakeClient()
         client.connect = AsyncMock()
-        client.read_gatt_char = AsyncMock(return_value=PACKET.pack(2, 17, 0, 0, 2, 0, 1, 0, 0, 0, 0, 0, 0, 0))
+        client.read_gatt_char = AsyncMock(return_value=PACKET.pack(2, 17, 0, 0, 2, 0, 1, 0, 0, 0, 0, 0, 0, 3))
         module = SimpleNamespace(
             BleakClient=lambda *a, **kw: client,
             BleakScanner=SimpleNamespace(

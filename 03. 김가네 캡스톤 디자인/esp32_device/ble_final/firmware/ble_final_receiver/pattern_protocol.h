@@ -10,6 +10,7 @@ constexpr size_t kSize = 16;
 constexpr size_t kChannels = 5;
 constexpr uint8_t kVersion = 2;
 constexpr uint8_t kStop = 1;
+constexpr uint8_t kMulti = 2, kArrival = 4;
 constexpr uint8_t kConnected = 1, kActive = 2, kExpired = 4;
 constexpr uint8_t kInvalid = 8, kDry = 16, kFault = 32;
 enum Mode : uint8_t { Rate = 2, Direction = 3 };
@@ -35,13 +36,22 @@ class State {
   bool receive(const uint8_t* p, size_t size, uint32_t now) {
     tick(now);  // A late refresh must restart, not revive an expired phase.
     if (!connected_ || fault_ || p == nullptr || size != kSize ||
-        p[0] != kVersion || (p[1] & ~kStop) || p[9] || p[15]) return reject();
+        p[0] != kVersion || (p[1] != 0 && p[1] != kStop && p[1] != kMulti && p[1] != kArrival) || p[9] || p[15]) return reject();
     const uint16_t seq = read16(p + 2), ttl = read16(p + 4);
     if (ttl < 100 || ttl > 1000) return reject();
     const bool stop = (p[1] & kStop) != 0;
+    const bool multi = p[1] == kMulti, arrival = p[1] == kArrival;
+    const uint16_t detail = read16(p + 7);
     if (stop) {
       // Canonical STOP has no mode, proximity, channel or calibration values.
       for (size_t i = 6; i < kSize; ++i) if (p[i]) return reject();
+    } else if (multi) {
+      if (p[6] != Rate || detail > 1023) return reject();
+      for (size_t i = 0; i < kChannels; ++i)
+        if (((detail >> (2 * i)) & 3) > Near || p[10+i] == 0) return reject();
+    } else if (arrival) {
+      if ((p[6] != Rate && p[6] != Direction) || detail == 0) return reject();
+      for (size_t i = 10; i < 15; ++i) if (p[i] != 255) return reject();
     } else {
       if ((p[6] != Rate && p[6] != Direction) || p[7] > Near ||
           p[8] >= kChannels || (p[6] == Direction &&
@@ -56,11 +66,30 @@ class State {
     if (newer) { sequence_ = seq; hasSequence_ = true; }
     invalid_ = expired_ = false;
     if (stop) { clear(); return true; }
+    if (arrival) {
+      // A refresh (even after STOP/expiry) cannot replay this event.
+      if (hasArrival_ && detail == arrivalId_) {
+        if (active_ && kind_ == kArrival) { receivedAt_ = now; ttl_ = ttl; }
+        render(now);
+        return true;
+      }
+      hasArrival_ = true; arrivalId_ = detail; phaseStart_ = now;
+    }
     // Heartbeats do NOT restart the pulse or repeat a completed near event.
-    if (!active_ || mode_ != p[6] || zone_ != p[7] || channel_ != p[8]) {
+    if (!arrival && (!active_ || kind_ != p[1] || mode_ != p[6] ||
+        (!multi && (zone_ != p[7] || channel_ != p[8])))) {
       phaseStart_ = now;
     }
-    mode_ = p[6]; zone_ = p[7]; channel_ = p[8];
+    if (multi) {
+      for (size_t i = 0; i < kChannels; ++i) {
+        const uint8_t z = (detail >> (2*i)) & 3;
+        if (!active_ || kind_ != kMulti || zones_[i] != z) starts_[i] = now;
+        zones_[i] = z;
+      }
+    }
+    kind_ = p[1]; mode_ = p[6];
+    zone_ = (multi || arrival) ? Near : p[7];
+    channel_ = (multi || arrival) ? kIndex : p[8];
     for (size_t i = 0; i < kChannels; ++i) duties_[i] = p[10 + i];
     active_ = true; receivedAt_ = now; ttl_ = ttl;
     render(now);
@@ -84,9 +113,10 @@ class State {
     write16(out + 4, active_ ? static_cast<uint16_t>(ttl_ -
             static_cast<uint32_t>(now - receivedAt_)) : 0);
     out[6] = mode_; out[7] = zone_; out[8] = channel_;
-    out[9] = outputs_[channel_] != 0 ? 1 : 0;
+    out[9] = 0;
+    for (size_t i = 0; i < kChannels; ++i) if (outputs_[i]) out[9] = 1;
     for (size_t i = 0; i < kChannels; ++i) out[10 + i] = outputs_[i];
-    out[15] = 0;
+    out[15] = 3;  // bit0 independent rate channels, bit1 arrival event.
   }
 
  private:
@@ -94,6 +124,18 @@ class State {
     for (size_t i = 0; i < kChannels; ++i) outputs_[i] = 0;
     if (!active_ || fault_) return;
     const uint32_t elapsed = static_cast<uint32_t>(now - phaseStart_);
+    if (kind_ == kArrival) {
+      if (elapsed < 150 || (elapsed >= 300 && elapsed < 450))
+        for (size_t i = 0; i < kChannels; ++i) outputs_[i] = 255;
+      return;
+    }
+    if (kind_ == kMulti) {
+      const uint32_t periods[] = {1200, 700, 400};
+      for (size_t i = 0; i < kChannels; ++i)
+        if (static_cast<uint32_t>(now - starts_[i]) % periods[zones_[i]] < 200)
+          outputs_[i] = duties_[i];
+      return;
+    }
     bool on;
     if (mode_ == Direction && zone_ == Near) {
       // One double tap on entry. Near is NOT proof of contact or grasp.
@@ -113,6 +155,7 @@ class State {
     clear(); hasSequence_ = invalid_ = expired_ = false;
     sequence_ = 0; receivedAt_ = phaseStart_ = 0; ttl_ = 100;
     mode_ = Rate; zone_ = Far; channel_ = kIndex;
+    kind_ = 0; hasArrival_ = false; arrivalId_ = 0;
     // Hardware faults latch until RESET, including across reconnects.
   }
   bool dry_, connected_ = false, active_ = false, expired_ = false;
@@ -121,6 +164,10 @@ class State {
   uint32_t receivedAt_ = 0, phaseStart_ = 0;
   uint8_t mode_ = Rate, zone_ = Far, channel_ = kIndex;
   uint8_t duties_[kChannels] = {}, outputs_[kChannels] = {};
+  uint8_t kind_ = 0, zones_[kChannels] = {};
+  uint32_t starts_[kChannels] = {};
+  uint16_t arrivalId_ = 0;
+  bool hasArrival_ = false;
 };
 }  // namespace haptic2
 #endif
