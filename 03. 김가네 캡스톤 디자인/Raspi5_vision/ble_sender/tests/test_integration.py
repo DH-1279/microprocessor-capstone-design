@@ -137,6 +137,9 @@ class BridgeProbe:
     def check(self):
         return True
 
+    def pop_notice(self):
+        return None
+
     def stop(self):
         self.sent.append(None)
 
@@ -349,6 +352,33 @@ class DetectorLoopTests(unittest.TestCase):
         self.assertTrue(any(cue is not None and cue.channel == Channel.TH for cue in sent))
         self.assertIsNone(sent[-1])
         self.assertTrue(all(len(packet) == 16 for packet in packets))
+        self.assertFalse(run.bridge.thread.is_alive())
+
+    def test_runtime_write_timeout_keeps_detector_alive_and_announces_loss(self):
+        attempts = []
+
+        class FailingLink:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def send(self, cue):
+                attempts.append(cue)
+                if cue is not None:
+                    raise TimeoutError("mock active write timeout")
+
+            async def __aexit__(self, *args):
+                pass
+
+        with patch("ble_sender.cli.Link", FailingLink):
+            run = replay([{"text": "캡스톤"}, {"text": "컵"}] + [{} for _ in range(10)], real_runtime=True)
+        self.assertEqual(run.code, 0, run.log)
+        self.assertEqual(len(run.states), 12)
+        self.assertTrue(any("진동 안내가 중단" in text for text in run.spoken))
+        self.assertEqual(sum(cue is not None for cue in attempts), 1)
+        self.assertIsNone(run.bridge.error)
         self.assertFalse(run.bridge.thread.is_alive())
 
 

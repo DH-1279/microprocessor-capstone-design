@@ -2,6 +2,7 @@
 
 import asyncio
 import math
+import queue
 import threading
 
 from .cli import parser as sender_parser, run
@@ -35,10 +36,11 @@ class DetectorBLE:
         self.thread = None
         self.publisher = None
         self.error = None
+        self.notices = queue.SimpleQueue()
 
     def _worker(self):
         try:
-            asyncio.run(run(self.args, ready=self.ready, stop_requested=self.stop_requested))
+            asyncio.run(run(self.args, ready=self.ready, stop_requested=self.stop_requested, on_fault=self.notices.put))
         except asyncio.CancelledError as error:
             if not self.stop_requested.is_set():
                 self.error = error
@@ -74,6 +76,12 @@ class DetectorBLE:
     def stop(self):
         if self.publisher is not None:
             self.publisher.stop()
+
+    def pop_notice(self):
+        try:
+            return self.notices.get_nowait()
+        except queue.Empty:
+            return None
 
     def publish(self, *, active, **observation):
         if self.publisher is None:

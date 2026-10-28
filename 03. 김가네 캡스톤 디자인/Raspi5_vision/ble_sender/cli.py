@@ -10,7 +10,7 @@ from time import monotonic
 
 from .controller import Controller
 from .link import Link
-from .protocol import Channel, encode
+from .protocol import Channel, Zone, encode
 from .publisher import HOST, PORT
 
 
@@ -81,7 +81,8 @@ def start_console(loop, commands, changed):
 
 async def transmit(controller, link, commands, changed, finished, *, interval=0.1, reply=print):
     """Only this coroutine writes BLE; callbacks update desired state only."""
-    last_cue, last_write = object(), -float("inf")
+    # Link.__aenter__ already confirmed STOP before this loop starts.
+    last_cue, last_write = None, -float("inf")
     while not finished.is_set():
         changed.clear()
         while not commands.empty():
@@ -103,24 +104,57 @@ async def transmit(controller, link, commands, changed, finished, *, interval=0.
         # never acquire a new freshness timestamp because a write was slow.
         now = monotonic()
         cue = controller.cue()
-        if cue != last_cue or now - last_write >= interval:
+        # STOP is immediate. Active changes are coalesced to at most 10Hz;
+        # do not fill the adapter with a burst when direction/zone jitters.
+        # An idle STOP needs no heartbeat because it cannot expire into ON.
+        if (cue is None and last_cue is not None) or (cue is not None and now - last_write >= interval):
             await link.send(cue)
             if cue != last_cue:
                 text = (
                     "STOP"
                     if cue is None
-                    else (f"mode={cue.mode} {cue.zone.name}/{cue.channel.name} duty={cue.duties[cue.channel]}")
+                    else (
+                        f"mode={cue.mode} {Zone(cue.zone).name}/{Channel(cue.channel).name} duty={cue.duties[cue.channel]}"
+                    )
                 )
                 reply(f"송신: {text} | {controller.reason}")
             last_cue, last_write = cue, now
-        wait_for = max(0.001, interval - (monotonic() - last_write))
+        wait_for = interval if cue is None else max(0.001, interval - (monotonic() - last_write))
         try:
             await asyncio.wait_for(changed.wait(), wait_for)
         except TimeoutError:
             pass
 
 
-async def run(args, *, ready=None, stop_requested=None):
+async def wait_reconnect(controller, commands, changed, finished, detail, *, reply=print):
+    """No link I/O here. Explicit reconnect, then explicit resume, are required."""
+    controller.command("stop")
+    reply(f"BLE 진동 안내 중단 | {detail}")
+    reply("영상·음성은 계속 동작합니다. reconnect로 재연결한 뒤 resume으로 진동 안내를 재개하세요.")
+    while not finished.is_set():
+        changed.clear()
+        while not commands.empty():
+            line = commands.get_nowait()
+            words = line.lower().split()
+            if words == ["reconnect"]:
+                return True
+            if words and words[0] in ("resume", "test"):
+                reply("BLE가 중단되어 있습니다. 먼저 reconnect를 입력하세요.")
+                continue
+            message, _, quit_requested = controller.command(line)
+            if message:
+                reply(message)
+            if quit_requested:
+                finished.set()
+                return False
+        try:
+            await asyncio.wait_for(changed.wait(), 0.1)
+        except TimeoutError:
+            pass
+    return False
+
+
+async def run(args, *, ready=None, stop_requested=None, on_fault=None):
     loop = asyncio.get_running_loop()
     changed, finished = asyncio.Event(), asyncio.Event()
     controller = Controller(
@@ -165,21 +199,46 @@ async def run(args, *, ready=None, stop_requested=None):
             await asyncio.sleep(0.05)
 
     watcher = asyncio.create_task(watch_owner()) if stop_requested is not None else None
+    connected_once = False
+    console_started = False
+
+    def reply(text):
+        print(text, flush=True)
+
     try:
-        async with (
-            ConsoleLink()
-            if args.dry_run
-            else Link(args.address, scan_timeout=args.scan_timeout, connect_timeout=args.connect_timeout) as link
-        ):
-            print(f"영상 입력: {HOST}:{args.port} | mode={args.mode} | 왼손 장갑", flush=True)
-            print("명령: mode 2 / mode 3 / status / stop / resume / quit", flush=True)
-            if args.allow_test:
-                print("독립 시험 허용: test far in 2 (2안), test middle th 2 (3안)", flush=True)
-            if not args.no_console:
-                close_console = start_console(loop, commands, changed)
-            if ready is not None:
-                ready.set()  # Only after connection, initial STOP and status validation.
-            await transmit(controller, link, commands, changed, finished, reply=lambda s: print(s, flush=True))
+        while not finished.is_set():
+            connecting = True
+            try:
+                async with (
+                    ConsoleLink()
+                    if args.dry_run
+                    else Link(
+                        args.address, scan_timeout=args.scan_timeout, connect_timeout=args.connect_timeout
+                    ) as link
+                ):
+                    connecting = False
+                    was_connected = connected_once
+                    connected_once = True
+                    print(f"영상 입력: {HOST}:{args.port} | mode={controller.mode} | 왼손 장갑", flush=True)
+                    print("명령: mode 2 / mode 3 / status / stop / resume / reconnect / quit", flush=True)
+                    if args.allow_test:
+                        print("독립 시험 허용: test far in 2 (2안), test middle th 2 (3안)", flush=True)
+                    if not args.no_console and not console_started:
+                        close_console = start_console(loop, commands, changed)
+                        console_started = True
+                    if was_connected:
+                        reply("BLE 재연결 완료 | 진동은 정지 상태입니다. resume 이후 새 프레임으로 재개합니다.")
+                    if ready is not None:
+                        ready.set()
+                    await transmit(controller, link, commands, changed, finished, reply=reply)
+            except Exception as error:
+                if not connected_once or (not connecting and not isinstance(error, (TimeoutError, ConnectionError))):
+                    raise
+                detail = f"{type(error).__name__}: {error}"
+                if on_fault is not None:
+                    on_fault(detail)
+                if not await wait_reconnect(controller, commands, changed, finished, detail, reply=reply):
+                    break
     finally:
         if watcher is not None:
             watcher.cancel()

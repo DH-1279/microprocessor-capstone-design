@@ -12,7 +12,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from ble_sender.cli import Inbox, transmit
+from ble_sender.cli import Inbox, transmit, wait_reconnect
 from ble_sender.controller import Controller
 from ble_sender.guidance import Mapper, fresh_cue
 from ble_sender.link import Link
@@ -266,6 +266,187 @@ class FakeClient:
 
 
 class AsyncTests(unittest.IsolatedAsyncioTestCase):
+    async def test_fault_wait_requires_reconnect_and_keeps_resume_locked(self):
+        c = Controller()
+        commands, changed, finished = asyncio.Queue(), asyncio.Event(), asyncio.Event()
+        for line in ("resume", "test far in 1", "mode 3", "reconnect"):
+            commands.put_nowait(line)
+        messages = []
+        reconnect = await wait_reconnect(c, commands, changed, finished, "mock timeout", reply=messages.append)
+        self.assertTrue(reconnect)
+        self.assertTrue(c.paused)
+        self.assertEqual(c.mode, 3)
+        self.assertIsNone(c.cue())
+        self.assertTrue(any("먼저 reconnect" in message for message in messages))
+
+    async def test_quit_works_while_link_is_faulted(self):
+        c = Controller()
+        commands, changed, finished = asyncio.Queue(), asyncio.Event(), asyncio.Event()
+        commands.put_nowait("quit")
+        self.assertFalse(await wait_reconnect(c, commands, changed, finished, "mock timeout", reply=lambda _: None))
+        self.assertTrue(finished.is_set())
+
+    async def test_direction_changes_are_coalesced_but_stop_is_immediate(self):
+        clock, current = [0.0], [Cue(3, 0, 0)]
+        evaluated, written = asyncio.Event(), asyncio.Event()
+        commands, changed, finished = asyncio.Queue(), asyncio.Event(), asyncio.Event()
+        sent = []
+
+        def desired():
+            evaluated.set()
+            return current[0]
+
+        class FakeLink:
+            async def send(self, cue):
+                sent.append((clock[0], cue))
+                written.set()
+
+        c = SimpleNamespace(cue=desired, reason="test")
+        with patch("ble_sender.cli.monotonic", side_effect=lambda: clock[0]):
+            task = asyncio.create_task(transmit(c, FakeLink(), commands, changed, finished, reply=lambda _: None))
+            try:
+                await asyncio.wait_for(written.wait(), 1)
+                written.clear()
+                for at, cue in ((0.01, Cue(3, 0, 1)), (0.02, Cue(3, 0, 4))):
+                    evaluated.clear()
+                    clock[0], current[0] = at, cue
+                    changed.set()
+                    await asyncio.wait_for(evaluated.wait(), 1)
+                    self.assertEqual(len(sent), 1)
+                clock[0] = 0.1
+                changed.set()
+                await asyncio.wait_for(written.wait(), 1)
+                self.assertEqual(sent[-1][1].channel, 4)
+                written.clear()
+                clock[0], current[0] = 0.101, None
+                changed.set()
+                await asyncio.wait_for(written.wait(), 1)
+                self.assertEqual(sent[-1], (0.101, None))
+            finally:
+                finished.set()
+                changed.set()
+                await asyncio.wait_for(task, 1)
+
+    async def test_idle_stop_is_not_repeated_as_a_heartbeat(self):
+        commands, changed, finished = asyncio.Queue(), asyncio.Event(), asyncio.Event()
+        sent = []
+
+        class FakeLink:
+            async def send(self, cue):
+                sent.append(cue)
+
+        c = SimpleNamespace(cue=lambda: None, reason="idle")
+        task = asyncio.create_task(
+            transmit(c, FakeLink(), commands, changed, finished, interval=0.005, reply=lambda _: None)
+        )
+        await asyncio.sleep(0.03)
+        finished.set()
+        changed.set()
+        await task
+        self.assertEqual(sent, [])
+
+    async def test_runtime_reconnect_does_not_resume_until_explicit_command(self):
+        from ble_sender.cli import run
+        from ble_sender.integration import detector_arguments
+
+        ready, fault, second_connected, active_again = [asyncio.Event() for _ in range(4)]
+        terminal, sessions, sent, inboxes = [], [], [], []
+
+        def inbox(controller, changed):
+            inboxes.append(controller)
+            return Inbox(controller, changed)
+
+        def console(loop, commands, changed):
+            terminal.extend((commands, changed))
+            return lambda: None
+
+        def failed(detail):
+            fault.set()
+
+        class RecoveringLink:
+            def __init__(self, *args, **kwargs):
+                self.index = len(sessions) + 1
+                sessions.append(self)
+
+            async def __aenter__(self):
+                sent.append((self.index, None))
+                if self.index == 2:
+                    second_connected.set()
+                return self
+
+            async def send(self, cue):
+                sent.append((self.index, cue))
+                if self.index == 1 and cue is not None:
+                    raise TimeoutError("mock delay")
+                if self.index == 2 and cue is not None:
+                    active_again.set()
+
+            async def __aexit__(self, *args):
+                pass
+
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+        args = detector_arguments(["--port", str(port), "--stable-frames", "1"])
+        with (
+            patch("ble_sender.cli.Link", RecoveringLink),
+            patch("ble_sender.cli.start_console", console),
+            patch("ble_sender.cli.Inbox", side_effect=inbox),
+            patch("builtins.print"),
+        ):
+            task = asyncio.create_task(run(args, ready=ready, on_fault=failed))
+            publisher = VisionPublisher(port)
+            next_frame = [0]
+
+            def observe():
+                next_frame[0] += 1
+                publisher.publish(
+                    target_id="cup",
+                    frame_id=next_frame[0],
+                    captured_at=time.monotonic(),
+                    size=(640, 640),
+                    landmarks=hand(),
+                    target_box=box_at(0.15, 0.55),
+                )
+
+            async def stream_until(event):
+                for _ in range(40):
+                    if event.is_set():
+                        return
+                    observe()
+                    try:
+                        await asyncio.wait_for(event.wait(), 0.025)
+                        return
+                    except TimeoutError:
+                        pass
+                self.fail(f"stream event missing: task_done={task.done()} reasons={[c.reason for c in inboxes]!r}")
+
+            try:
+                await asyncio.wait_for(ready.wait(), 2)
+                await stream_until(fault)
+                self.assertFalse(task.done())
+                commands, changed = terminal
+                commands.put_nowait("reconnect")
+                changed.set()
+                await asyncio.wait_for(second_connected.wait(), 2)
+                for _ in range(3):
+                    observe()
+                    await asyncio.sleep(0.01)
+                self.assertFalse(active_again.is_set())
+                commands.put_nowait("resume")
+                changed.set()
+                await asyncio.sleep(0.01)
+                await stream_until(active_again)
+                commands.put_nowait("quit")
+                changed.set()
+                await asyncio.wait_for(task, 2)
+            finally:
+                publisher.close()
+                if not task.done():
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+        self.assertEqual(len(sessions), 2)
+
     async def test_discovery_connect_initial_stop_and_dry_status(self):
         from ble_sender.protocol import NAME, SERVICE
 
