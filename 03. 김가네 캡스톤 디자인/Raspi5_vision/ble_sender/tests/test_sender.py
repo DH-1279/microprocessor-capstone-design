@@ -494,13 +494,53 @@ class AsyncTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(PACKET.unpack(client.writes[0][1])[1], 1)
         self.assertFalse(client.is_connected)
 
-    async def test_active_write_deadline_remains_300ms(self):
+    async def test_write_ack_deadline_is_bounded_at_one_second(self):
         link = Link()
         link.client = FakeClient()
         with patch("ble_sender.link.asyncio.wait_for", wraps=asyncio.wait_for) as waiting:
             await link.send(Cue(2, 0, 1))
-            self.assertEqual(waiting.call_args.args[1], 0.3)
+            self.assertEqual(waiting.call_args.args[1], 1.0)
         await link.close()
+
+    async def test_received_command_with_350ms_ack_does_not_abort_connection(self):
+        client = FakeClient()
+        original = client.write_gatt_char
+
+        async def delayed(*args, **kwargs):
+            if not client.writes:
+                await asyncio.sleep(0.35)
+            await original(*args, **kwargs)
+
+        client.write_gatt_char = delayed
+        link = Link()
+        link.client = client
+        with self.assertLogs("ble_sender.link", "WARNING"):
+            await link.send(Cue(2, 0, 1))
+        self.assertTrue(client.is_connected)
+        self.assertGreater(link.last_ack_s, 0.3)
+        await link.close()
+
+    async def test_late_ack_does_not_resend_a_stale_camera_cue(self):
+        clock = [1.0]
+        c = Controller(clock=lambda: clock[0], stable_frames=1)
+        clock[0] = 1.01
+        c.receive(packet(1, captured=clock[0]))
+        commands, changed, finished = asyncio.Queue(), asyncio.Event(), asyncio.Event()
+        sent = []
+
+        class DelayedLink:
+            async def send(self, cue):
+                sent.append(cue)
+                if cue is not None:
+                    clock[0] += 1  # Capture expired while acknowledgement was pending.
+                    await asyncio.sleep(0.01)
+                else:
+                    finished.set()
+
+        await transmit(c, DelayedLink(), commands, changed, finished, reply=lambda _: None)
+        self.assertEqual(len(sent), 2)
+        self.assertIsNotNone(sent[0])
+        self.assertIsNone(sent[1])
 
     async def test_failed_initial_stop_is_not_retried_on_stalled_att(self):
         client = FakeClient()
@@ -699,6 +739,46 @@ class AsyncTests(unittest.IsolatedAsyncioTestCase):
 
 @unittest.skipUnless(os.environ.get("HAPTIC_V2_LIB"), "native ESP test library not supplied")
 class FirmwareParityTests(unittest.TestCase):
+    def test_esp_ttl_expires_independently_while_host_waits_for_ack(self):
+        lib = ctypes.CDLL(os.environ["HAPTIC_V2_LIB"])
+        ptr = ctypes.POINTER(ctypes.c_uint8)
+        lib.v2_receive.argtypes = (ptr, ctypes.c_size_t, ctypes.c_uint32)
+        lib.v2_receive.restype = ctypes.c_int
+        lib.v2_status.argtypes = (ctypes.c_uint32, ptr)
+        lib.v2_reset()
+
+        async def exchange():
+            accepted, ack = asyncio.Event(), asyncio.Event()
+            now = [0]
+
+            class Receiver(FakeClient):
+                async def write_gatt_char(self, uuid, data, response):
+                    buf = (ctypes.c_uint8 * 16).from_buffer_copy(data)
+                    self_test.assertEqual(lib.v2_receive(buf, 16, now[0]), 1)
+                    accepted.set()
+                    await ack.wait()
+
+            link = Link()
+            link.client = Receiver()
+            task = asyncio.create_task(link.send(Cue(2, 0, 1)))
+            try:
+                await asyncio.wait_for(accepted.wait(), 1)
+                self.assertFalse(task.done())
+                now[0] = 600
+                out = (ctypes.c_uint8 * 16)()
+                lib.v2_status(now[0], out)
+                status = Status.decode(bytes(out))
+                self.assertTrue(status.flags & 4)
+                self.assertEqual(status.duties, (0, 0, 0, 0, 0))
+                ack.set()
+                await task
+            finally:
+                ack.set()
+                await link.close()
+
+        self_test = self
+        asyncio.run(exchange())
+
     def test_python_packets_drive_actual_cpp_firmware_patterns_and_expiry(self):
         lib = ctypes.CDLL(os.environ["HAPTIC_V2_LIB"])
         ptr = ctypes.POINTER(ctypes.c_uint8)

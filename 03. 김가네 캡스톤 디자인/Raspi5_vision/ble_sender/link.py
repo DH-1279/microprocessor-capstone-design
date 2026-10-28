@@ -10,7 +10,7 @@ from .protocol import COMMAND, NAME, SERVICE, STATUS, Status, encode
 logger = logging.getLogger(__name__)
 CONNECT_GRACE = 2
 STARTUP_IO_TIMEOUT = 5
-ACTIVE_WRITE_TIMEOUT = 0.3
+WRITE_ACK_TIMEOUT = 1.0
 DISCONNECT_TIMEOUT = 3
 
 
@@ -25,6 +25,8 @@ class Link:
         self.address, self.client, self.sequence = address, None, 0
         self.scan_timeout, self.connect_timeout = scan_timeout, connect_timeout
         self.last_operation = "초기화"
+        self.last_ack_s = None
+        self.last_slow_notice = -math.inf
 
     async def __aenter__(self):
         from bleak import BleakClient, BleakScanner
@@ -51,7 +53,7 @@ class Link:
             stage = "초기 STOP 전송"
             print(f"BLE {stage} 중 | 제한={STARTUP_IO_TIMEOUT}초", flush=True)
             # Initial STOP cannot energize a motor, so allow first-ATT setup
-            # latency without relaxing the deadline for live guidance writes.
+            # latency independently of the live-write acknowledgement limit.
             await self._write(None, STARTUP_IO_TIMEOUT)
             stage = "초기 상태 읽기"
             print(f"BLE {stage} 중 | 제한={STARTUP_IO_TIMEOUT}초", flush=True)
@@ -80,7 +82,7 @@ class Link:
             raise
 
     async def send(self, cue):
-        await self._write(cue, ACTIVE_WRITE_TIMEOUT)
+        await self._write(cue, WRITE_ACK_TIMEOUT)
 
     async def _write(self, cue, timeout):
         if self.client is None or not self.client.is_connected:
@@ -102,6 +104,10 @@ class Link:
             ) from error
         except Exception as error:
             raise ConnectionError(f"{self.last_operation} 실패: {type(error).__name__}: {error}") from error
+        self.last_ack_s = monotonic() - started
+        if cue is not None and self.last_ack_s > 0.3 and monotonic() - self.last_slow_notice >= 5:
+            self.last_slow_notice = monotonic()
+            logger.warning("BLE 응답 지연 %.3f초 (연결 유지) | %s", self.last_ack_s, self.last_operation)
 
     async def status(self, *, timeout=2):
         self.last_operation = "상태 읽기"
