@@ -33,6 +33,7 @@ class Mapper:
         hysteresis=0.10,
         stable_frames=3,
         mirrored=False,
+        multi_rate=False,
     ):
         Cue(mode, Zone.FAR, rate_channel if mode == Mode.RATE else Channel.TH, duties).validate()
         if (
@@ -51,6 +52,7 @@ class Mapper:
             hysteresis,
         )
         self.stable_frames, self.mirrored = stable_frames, mirrored
+        self.multi_rate = multi_rate
         self.last_capture = -math.inf
         self.reset()
 
@@ -59,6 +61,7 @@ class Mapper:
         self.channel = None
         self.pending = None
         self.count = 0
+        self.finger_zones = [None] * 5
 
     def _zone(self, d):
         n, m, h = self.near, self.middle, self.hysteresis
@@ -167,8 +170,20 @@ class Mapper:
                 # Do not continue the old direction during an unconfirmed switch.
                 return None
             self.channel = candidate
+            zones = None
+            if self.mode == Mode.RATE and self.multi_rate:
+                zones = []
+                saved_zone = self.zone
+                for finger, index in enumerate((4, 8, 12, 16, 20)):
+                    tx, ty = points[index]
+                    gap = math.hypot(max(x1 - tx, 0, tx - x2), max(y1 - ty, 0, ty - y2)) / palm_width
+                    self.zone = self.finger_zones[finger]
+                    zones.append(int(self._zone(gap)))
+                self.finger_zones = zones
+                self.zone = saved_zone
+                zones = tuple(zones)
             return Guidance(
-                Cue(self.mode, self.zone, candidate, self.duties),
+                Cue(self.mode, self.zone, candidate, self.duties, zones=zones),
                 captured_at,
                 facing,
                 distance,

@@ -10,7 +10,7 @@ from time import monotonic
 
 from .controller import Controller
 from .link import Link
-from .protocol import Channel, Zone, encode
+from .protocol import Channel, encode
 from .publisher import HOST, PORT
 
 
@@ -113,9 +113,7 @@ async def transmit(controller, link, commands, changed, finished, *, interval=0.
                 text = (
                     "STOP"
                     if cue is None
-                    else (
-                        f"mode={cue.mode} {Zone(cue.zone).name}/{Channel(cue.channel).name} duty={cue.duties[cue.channel]}"
-                    )
+                    else cue.describe()
                 )
                 reply(f"송신: {text} | {controller.reason}")
             last_cue, last_write = cue, now
@@ -167,6 +165,7 @@ async def run(args, *, ready=None, stop_requested=None, on_fault=None):
         middle=args.middle,
         mirrored=args.mirrored,
         allow_test=args.allow_test,
+        multi_rate=not args.single_rate,
     )
     transport, _ = await loop.create_datagram_endpoint(
         lambda: Inbox(controller, changed),
@@ -260,6 +259,7 @@ def parser():
     p.add_argument("--allow-test", action="store_true", help="최대 2초 독립 모터 시험 허용")
     p.add_argument("--no-console", action="store_true", help="키보드 입력 없이 실행")
     p.add_argument("--rate-channel", choices=tuple(Channel.__members__), default="IN")
+    p.add_argument("--single-rate", action="store_true", help="mode 2를 지정한 한 손가락으로만 시험 (기본은 다섯 채널)")
     p.add_argument(
         "--duties",
         nargs=5,

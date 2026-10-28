@@ -89,7 +89,11 @@ class DetectorBLE:
         if active:
             self.publisher.publish(**observation)
         else:
-            self.stop()
+            self.publisher.idle()
+
+    def arrive(self, **observation):
+        if self.publisher is not None:
+            return self.publisher.publish(event="arrival", **observation)
 
     def close(self):
         try:

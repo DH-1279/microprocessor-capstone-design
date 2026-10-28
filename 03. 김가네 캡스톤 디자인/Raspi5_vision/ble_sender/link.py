@@ -58,6 +58,8 @@ class Link:
             stage = "초기 상태 읽기"
             print(f"BLE {stage} 중 | 제한={STARTUP_IO_TIMEOUT}초", flush=True)
             status = await self.status(timeout=STARTUP_IO_TIMEOUT)
+            if status.capabilities != 3:
+                raise RuntimeError("ESP 펌웨어 업데이트 필요: ble_final_receiver를 다시 업로드하세요 (다섯 채널/도달 알림 미지원).")
             print(
                 "BLE 연결 | " + ("ESP DRY_RUN: 실제 모터 출력 없음" if status.flags & 16 else "실제 모터 출력 가능"),
                 flush=True,
@@ -94,6 +96,8 @@ class Link:
             else f"명령 쓰기 seq={self.sequence} mode={int(cue.mode)} zone={int(cue.zone)} "
             f"ch={int(cue.channel)} duty={cue.duties[cue.channel]}"
         )
+        if cue is not None and (cue.zones is not None or cue.arrival_id is not None):
+            self.last_operation = f"명령 쓰기 seq={self.sequence} {cue.describe()}"
         self.sequence = (self.sequence + 1) & 65535
         started = monotonic()
         try:

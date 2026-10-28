@@ -2,6 +2,8 @@
 
 import json
 import math
+import secrets
+from collections import deque
 from time import monotonic
 
 from .guidance import Mapper, fresh_cue
@@ -27,6 +29,7 @@ class Controller:
         mirrored=False,
         allow_test=False,
         clock=monotonic,
+        multi_rate=False,
     ):
         self.clock = clock
         self.mapper_options = dict(
@@ -37,6 +40,7 @@ class Controller:
             near=near,
             middle=middle,
             mirrored=mirrored,
+            multi_rate=multi_rate,
         )
         self.mapper = Mapper(mode=mode, **self.mapper_options)
         self.mode = Mode(mode)
@@ -53,8 +57,13 @@ class Controller:
         self.test_until = 0
         self.floor = self.clock()
         self.reason = "영상 입력 대기"
+        self.completed = deque(maxlen=128)
+        self.arrival_cue = None
+        self.arrival_until = 0
+        self.event_id = secrets.randbelow(65535)
 
     def clear(self, reason):
+        self.arrival_cue = None
         self.mapper.reset()
         self.guidance = None
         self.target_id = None
@@ -92,6 +101,8 @@ class Controller:
             self.last_sequence = packet["sequence"]
             self.last_packet_at = now
             if not packet["active"]:
+                if packet.get("idle") is True and self.arrival_cue is not None:
+                    return True  # Routine WAIT_WAKE must not truncate the event.
                 self.clear("시동어 대기 / 취소 / 종료 / 관측 상실")
                 return True
             captured = packet.get("captured_at")
@@ -125,6 +136,28 @@ class Controller:
                 packet.get("size"),
                 observed=True,
             )
+            if packet.get("event") == "arrival":
+                if target_id in self.completed:
+                    self.guidance = None
+                    return True
+                # Validate geometry independently of direction stabilization.
+                validator = Mapper(mode=3, stable_frames=1, max_age=self.mapper.max_age)
+                if validator.update(packet.get("landmarks"), packet.get("target_box"), captured,
+                                    now, packet.get("size")) is None:
+                    raise ValueError("invalid arrival observation")
+                self.completed.append(target_id)
+                self.event_id = self.event_id % 65535 + 1
+                self.arrival_cue = Cue(self.mode, Zone.NEAR,
+                                       Channel.MI if self.mode == Mode.DIRECTION else Channel.IN,
+                                       (255,) * 5, arrival_id=self.event_id)
+                # A finite event is not a stream of refreshed camera positions.
+                # Firmware runs exactly 450ms once; allow delivery/ACK latency.
+                self.arrival_until = now + 1.5
+                self.guidance = None
+                self.reason = "목표 영역 도달: 다섯 손가락 최대 PWM 두 번"
+                return True
+            if target_id in self.completed:
+                self.guidance = None
             self.reason = "안내" if self.guidance else "손 좌표 검증 / 방향 안정화 중"
             return True
         except (ValueError, TypeError, KeyError, UnicodeError, RecursionError):
@@ -135,6 +168,10 @@ class Controller:
         now = self.clock() if now is None else now
         if self.paused:
             return None
+        if self.arrival_cue is not None:
+            if now < self.arrival_until:
+                return self.arrival_cue
+            self.clear("도달 알림 완료: 정지")
         if self.test_cue is not None:
             if now < self.test_until:
                 return self.test_cue
@@ -175,7 +212,7 @@ class Controller:
             text = (
                 "STOP"
                 if current is None
-                else (f"{current.zone.name}/{current.channel.name} duty={current.duties[current.channel]}")
+                else current.describe()
             )
             return f"mode={self.mode.value} paused={self.paused} | {text} | {self.reason}", False, False
         if words[0] == "test":
@@ -190,7 +227,7 @@ class Controller:
                 if not math.isfinite(seconds) or not 0 < seconds <= 2:
                     raise ValueError("시험 시간은 0초 초과, 2초 이하")
                 # Fixed channel in mode 2; MI is reserved for mode 3 near.
-                if self.mode == Mode.RATE and channel != self.mapper.rate_channel:
+                if self.mode == Mode.RATE and not self.mapper.multi_rate and channel != self.mapper.rate_channel:
                     raise ValueError("mode 2는 --rate-channel로 지정한 채널만 사용")
                 cue = Cue(self.mode, zone, channel, self.mapper.duties)
                 cue.validate()

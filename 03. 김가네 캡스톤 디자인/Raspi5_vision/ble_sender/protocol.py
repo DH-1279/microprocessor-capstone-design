@@ -36,6 +36,16 @@ class Cue:
     zone: Zone
     channel: Channel
     duties: tuple[int, ...] = (180, 180, 180, 180, 180)
+    zones: tuple[int, ...] | None = None
+    arrival_id: int | None = None
+
+    def describe(self):
+        if self.arrival_id is not None:
+            return f"도달 id={self.arrival_id} | ALL duty=255 | 150/150/150ms 한 회"
+        if self.zones is not None:
+            zones = ",".join(f"{ch.name}={Zone(z).name}" for ch, z in zip(Channel, self.zones))
+            return f"mode=2 | {zones} | duty={self.duties}"
+        return f"mode={int(self.mode)} {Zone(self.zone).name}/{Channel(self.channel).name} duty={self.duties[self.channel]}"
 
     def validate(self):
         if (
@@ -47,6 +57,14 @@ class Cue:
             raise ValueError("invalid mode, zone or channel")
         if len(self.duties) != 5 or any(type(n) is not int or not 1 <= n <= 255 for n in self.duties):
             raise ValueError("five calibrated duties, each 1..255, are required")
+        if self.arrival_id is not None:
+            if type(self.arrival_id) is not int or not 1 <= self.arrival_id <= 65535 or self.zones is not None:
+                raise ValueError("invalid arrival event")
+            if self.duties != (255,) * 5:
+                raise ValueError("arrival uses maximum PWM on all five channels")
+        if self.zones is not None:
+            if self.mode != Mode.RATE or len(self.zones) != 5 or any(type(z) is not int or z not in range(3) for z in self.zones):
+                raise ValueError("mode 2 needs five zones, each 0..2")
         if self.mode == Mode.DIRECTION and ((self.zone == Zone.NEAR) != (self.channel == Channel.MI)):
             raise ValueError("plan 3 reserves MI for the near event")
 
@@ -59,6 +77,12 @@ def encode(sequence: int, cue: Cue | None, ttl_ms: int = 500) -> bytes:
     if cue is None:
         return PACKET.pack(2, 1, sequence, ttl_ms, 0, 0, 0, 0, *([0] * 5), 0)
     cue.validate()
+    if cue.arrival_id is not None:
+        return PACKET.pack(2, 4, sequence, ttl_ms, int(cue.mode), cue.arrival_id & 255,
+                           cue.arrival_id >> 8, 0, *cue.duties, 0)
+    if cue.zones is not None:
+        packed = sum(z << (2 * i) for i, z in enumerate(cue.zones))
+        return PACKET.pack(2, 2, sequence, ttl_ms, 2, packed & 255, packed >> 8, 0, *cue.duties, 0)
     return PACKET.pack(2, 0, sequence, ttl_ms, cue.mode, cue.zone, cue.channel, 0, *cue.duties, 0)
 
 
@@ -72,6 +96,7 @@ class Status:
     channel: int
     on: bool
     duties: tuple[int, ...]
+    capabilities: int = 0
 
     @classmethod
     def decode(cls, data):
@@ -86,7 +111,7 @@ class Status:
             or zone > 2
             or channel > 4
             or phase > 1
-            or tail[-1] != 0
+            or tail[-1] & ~3
         ):
             raise ValueError("invalid v2 status")
-        return cls(flags, seq, ttl, mode, zone, channel, bool(phase), tuple(tail[:5]))
+        return cls(flags, seq, ttl, mode, zone, channel, bool(phase), tuple(tail[:5]), tail[-1])

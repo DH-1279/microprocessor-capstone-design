@@ -23,6 +23,7 @@ from hand_tracker import HandTracker, draw_hand
 from audio import AudioService
 import speech  # 문법 및 자모 편집 거리 기반 음성 파서
 from ble_sender.integration import DetectorBLE, detector_arguments
+from ble_sender.arrival import ArrivalGate
 
 # ==========================================
 # [긴급 패치 1] HailoRT physical.identify().device_architecture 우회
@@ -104,8 +105,7 @@ TARGET_MAPPING = {
 WAKE_WORDS = ("캡스톤", "갭스톤", "캡손", "캐스톤", "캡스", "캡스턴")
 WAKE_THRESHOLD = 0.35
 
-REACH_THRESHOLD = 50.0        
-REQUIRED_REACH_FRAMES = 5     
+ARRIVAL_DWELL = 0.4  # Same fingertip inside the inner box; image-plane arrival only.
 MAX_JUMP_DIST = 150.0         
 HAND_MISSING_ALERT_INTERVAL = 5.0  # 손 미인식 시 안내 주기 (5초)
 
@@ -211,11 +211,12 @@ def main(argv=None):
     lock_id = None
     frame_id = 0
     pending_ble_notice = False
+    pending_arrival_message = None
+    arrival_gate = ArrivalGate(dwell=ARRIVAL_DWELL, max_age=arguments.max_age)
     
     locked_target_box = None     
     locked_center = None         
     missing_frame_count = 0      
-    reach_frame_count = 0        
     no_hand_since = None  # 손 미인식 시작 시각 기록용 타이머
 
     fingertip_indices = (4, 8, 12, 16, 20)
@@ -253,6 +254,10 @@ def main(argv=None):
                     pending_ble_notice = True
                 if pending_ble_notice and audio_service.say("진동 안내가 중단되었습니다. 연결 상태를 확인해주세요."):
                     pending_ble_notice = False
+                if pending_arrival_message and audio_service.say(pending_arrival_message):
+                    pending_arrival_message = None
+                if state != "SEARCHING":
+                    arrival_gate.reset()
                 read_result = cam.read()
                 if read_result is None:
                     ble.stop()
@@ -282,7 +287,13 @@ def main(argv=None):
 
                 # (1) 시동어("캡스톤") 대기 상태
                 if state == "WAIT_WAKE":
+                    if command_text:
+                        idle_intent = speech.parse_input(command_text, TARGET_MAPPING, state="scanning")
+                        if idle_intent.kind == "control" and idle_intent.name == "stop":
+                            ble.stop()
+                            pending_arrival_message = None
                     if command_text and check_wake_word(command_text):
+                        pending_arrival_message = None
                         print("👉 시동어 '캡스톤' 감지됨!")
                         state = "WAIT_TARGET"
                         # (2) 시동어 감지 시 안내 멘트 + 현재 인식된 물건 안내
@@ -308,7 +319,6 @@ def main(argv=None):
                                     x1, y1, x2, y2 = locked_target_box
                                     locked_center = (int(((x1 + x2) / 2) * width), int(((y1 + y2) / 2) * height))
                                 missing_frame_count = 0
-                                reach_frame_count = 0
                                 no_hand_since = time.monotonic()  # 탐색 진입 시 손 미인식 타이머 시작
 
                                 print(f"🎯 타겟 설정 완료: {target_kor} (매칭 별칭: {intent.detail})")
@@ -323,6 +333,8 @@ def main(argv=None):
                             if intent.name == "list":
                                 audio_service.say(format_desk_items_speech(current_korean_list))
                             elif intent.name == "stop":
+                                ble.stop()
+                                pending_arrival_message = None
                                 print("⏹️ 대기 상태로 복귀합니다.")
                                 state = "WAIT_WAKE"
                                 audio_service.say("취소되었습니다. 다시 부르시려면 캡스톤이라고 말씀해주세요.")
@@ -345,7 +357,6 @@ def main(argv=None):
                                 locked_target_box = None
                                 locked_center = None
                                 missing_frame_count = 0
-                                reach_frame_count = 0
                                 no_hand_since = None
                                 audio_service.say("안내를 중지합니다. 다시 부르시려면 캡스톤이라고 말씀해주세요.")
                                 continue
@@ -373,7 +384,6 @@ def main(argv=None):
                                 found_target = closest_det
 
                     target_kor = get_korean_name(target_eng_label)
-                    hand_near_target = False
 
                     # 손 인식 여부에 따른 5초 주기 안내 타이머 처리
                     now_mono = time.monotonic()
@@ -397,32 +407,25 @@ def main(argv=None):
                     if locked_center is not None:
                         center_x, center_y = locked_center
 
-                        if landmarks is not None and found_target is not None:
-                            hand_cx = int(landmarks[9].x * width)
-                            hand_cy = int(landmarks[9].y * height)
-                            if math.hypot(center_x - hand_cx, center_y - hand_cy) < REACH_THRESHOLD:
-                                hand_near_target = True
-
-                        if hand_near_target:
-                            reach_frame_count += 1
-                        else:
-                            reach_frame_count = 0
-
-                        # (4) 손이 목표 물건에 도달할 때까지 진행 후 완료 처리 (찾은 경우 시동어 대기 상태로 복귀)
-                        if reach_frame_count >= REQUIRED_REACH_FRAMES:
-                            ble.stop()
-                            print(f"✨ [획득 성공!] {target_kor}을(를) 집어 들었습니다! ({reach_frame_count}프레임 연속 도달)")
+                        arrived = arrival_gate.update(
+                            lock_id, landmarks, found_target.box if found_target else None,
+                            timestamp, time.monotonic(), (width, height),
+                        )
+                        if arrived:
+                            ble.arrive(target_id=lock_id, frame_id=frame_id,
+                                       captured_at=timestamp, size=(width, height),
+                                       landmarks=landmarks, target_box=found_target.box)
+                            print(f"✨ [목표 영역 도달] {target_kor}: 같은 손가락이 안쪽 영역에 {ARRIVAL_DWELL}초 유지. 실제 파지 판정은 아닙니다.")
                             state = "WAIT_WAKE"
                             target_eng_label = None
                             locked_target_box = None
                             locked_center = None
                             missing_frame_count = 0
-                            reach_frame_count = 0
                             no_hand_since = None
-                            audio_service.say(f"{target_kor}을 찾았습니다. 다른 물건을 찾으려면 캡스톤을 말씀해주세요.")
+                            pending_arrival_message = f"{target_kor}의 목표 위치에 도달했습니다. 다른 물건을 찾으려면 캡스톤을 말씀해주세요."
                             continue
 
-                        if found_target is None and not hand_near_target and missing_frame_count > 45:
+                        if found_target is None and missing_frame_count > 45:
                             ble.stop()
                             print(f"⚠️ {target_kor}을(를) 장시간 찾을 수 없어 타겟을 해제합니다.")
                             audio_service.say("물건을 찾을 수 없습니다. 다시 말씀해 주세요.")
@@ -431,12 +434,11 @@ def main(argv=None):
                             locked_target_box = None
                             locked_center = None
                             missing_frame_count = 0
-                            reach_frame_count = 0
                             no_hand_since = None
                             continue
 
                         is_occluded = (found_target is None)
-                        status_str = " (⚠️ 손에 가려짐)" if is_occluded else ""
+                        status_str = " (⚠️ 목표 미검출: 진동 안내 일시 정지)" if is_occluded else ""
                         print(f"\n🎯 [탐색 중{status_str}] 목표: {target_kor} | 중심: ({center_x}, {center_y})")
 
                         if landmarks is not None:
