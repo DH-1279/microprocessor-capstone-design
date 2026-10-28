@@ -104,11 +104,23 @@ WAKE_THRESHOLD = 0.35
 REACH_THRESHOLD = 50.0        
 REQUIRED_REACH_FRAMES = 5     
 MAX_JUMP_DIST = 150.0         
+HAND_MISSING_ALERT_INTERVAL = 5.0  # 손 미인식 시 안내 주기 (5초)
 
 def get_korean_name(label: str) -> str:
     if label in TARGET_MAPPING:
         return TARGET_MAPPING[label]["name"]
     return label
+
+def format_desk_items_speech(korean_list: list[str]) -> str:
+    """현재 책상 위 인식된 물건 목록 안내 문구를 생성합니다."""
+    if korean_list:
+        items_str = ", ".join(korean_list)
+        return f"현재 책상위엔 {items_str}이 있습니다."
+    return "현재 책상위엔 인식된 물건이 없습니다."
+
+def format_prompt_target_speech(korean_list: list[str]) -> str:
+    """(2)번 상태 진입 시 안내할 기본 문구를 생성합니다."""
+    return f"찾을 물건을 말해주세요. {format_desk_items_speech(korean_list)}"
 
 def check_wake_word(text: str) -> bool:
     if not text:
@@ -201,6 +213,7 @@ def main():
     locked_center = None         
     missing_frame_count = 0      
     reach_frame_count = 0        
+    no_hand_since = None  # 손 미인식 시작 시각 기록용 타이머
 
     fingertip_indices = (4, 8, 12, 16, 20)
     tip_names = ("엄지", "검지", "중지", "약지", "새끼")
@@ -236,12 +249,15 @@ def main():
                     command_text = command_queue.get_nowait()
                     print(f"\n🗣️ [음성 인식]: {command_text}")
 
+                # (1) 시동어("캡스톤") 대기 상태
                 if state == "WAIT_WAKE":
                     if command_text and check_wake_word(command_text):
                         print("👉 시동어 '캡스톤' 감지됨!")
                         state = "WAIT_TARGET"
-                        audio_service.say("찾을 물건을 말해주세요.")
+                        # (2) 시동어 감지 시 안내 멘트 + 현재 인식된 물건 안내
+                        audio_service.say(format_prompt_target_speech(current_korean_list))
 
+                # (2) 찾을 물건 입력 대기 상태
                 elif state == "WAIT_TARGET":
                     if command_text:
                         intent = speech.parse_input(command_text, TARGET_MAPPING, state="scanning")
@@ -261,6 +277,7 @@ def main():
                                     locked_center = (int(((x1 + x2) / 2) * width), int(((y1 + y2) / 2) * height))
                                 missing_frame_count = 0
                                 reach_frame_count = 0
+                                no_hand_since = time.monotonic()  # 탐색 진입 시 손 미인식 타이머 시작
 
                                 print(f"🎯 타겟 설정 완료: {target_kor} (매칭 별칭: {intent.detail})")
                                 audio_service.say(f"{target_kor}을(를) 찾아 안내합니다.")
@@ -270,12 +287,9 @@ def main():
                                 audio_service.say(f"현재 화면에 {target_kor}이 없습니다. 다시 말씀해 주세요.")
 
                         elif intent.kind == "control":
+                            # (3) "리스트" 명령 시 현재 책상 위 물건 안내
                             if intent.name == "list":
-                                if current_korean_list:
-                                    items_str = ", ".join(current_korean_list)
-                                    audio_service.say(f"현재 주변에 {items_str}이 있습니다.")
-                                else:
-                                    audio_service.say("현재 인식된 물체가 없습니다.")
+                                audio_service.say(format_desk_items_speech(current_korean_list))
                             elif intent.name == "stop":
                                 print("⏹️ 대기 상태로 복귀합니다.")
                                 state = "WAIT_WAKE"
@@ -285,25 +299,26 @@ def main():
                             if refusal_msg:
                                 audio_service.say(refusal_msg)
 
+                # (4) 목표 물건 추적 상태
                 elif state == "SEARCHING":
                     if command_text:
                         intent = speech.parse_input(command_text, TARGET_MAPPING, state="guiding")
                         if intent.kind == "control":
+                            # (5) 추적 중간에 "취소" 등의 명령 시 안내 종료 후 (2)번 상태(WAIT_TARGET)로 복귀하여 다시 멘트
                             if intent.name == "stop":
-                                print("⏹️ 사용자 요청으로 안내를 중지합니다.")
-                                audio_service.say("안내를 중지합니다.")
-                                state = "WAIT_WAKE"
+                                print("⏹️ 사용자 요청으로 안내를 종료하고 물건 선택 단계로 복귀합니다.")
+                                state = "WAIT_TARGET"
                                 target_eng_label = None
                                 locked_target_box = None
                                 locked_center = None
                                 missing_frame_count = 0
                                 reach_frame_count = 0
+                                no_hand_since = None
+                                audio_service.say(f"안내를 종료합니다. {format_prompt_target_speech(current_korean_list)}")
                                 continue
+                            # (3) 추적 중에도 "리스트"를 외치면 동일하게 안내
                             elif intent.name == "list":
-                                if current_korean_list:
-                                    audio_service.say(f"주변에 {', '.join(current_korean_list)}이 있습니다.")
-                                else:
-                                    audio_service.say("인식된 물체가 없습니다.")
+                                audio_service.say(format_desk_items_speech(current_korean_list))
                             elif intent.name == "repeat" and target_eng_label:
                                 audio_service.say(f"현재 {get_korean_name(target_eng_label)}을 찾고 있습니다.")
 
@@ -328,6 +343,17 @@ def main():
                     landmarks = getattr(tracker, "last_landmarks", None)
                     hand_near_target = False
 
+                    # 손 인식 여부에 따른 5초 주기 안내 타이머 처리
+                    now_mono = time.monotonic()
+                    if landmarks is not None:
+                        no_hand_since = None
+                    else:
+                        if no_hand_since is None:
+                            no_hand_since = now_mono
+                        elif now_mono - no_hand_since >= HAND_MISSING_ALERT_INTERVAL:
+                            if audio_service.say("손이 인식되지 않습니다."):
+                                no_hand_since = now_mono
+
                     if found_target:
                         locked_target_box = found_target.box
                         x1, y1, x2, y2 = locked_target_box
@@ -350,6 +376,7 @@ def main():
                         else:
                             reach_frame_count = 0
 
+                        # (4) 손이 목표 물건에 도달할 때까지 진행 후 완료 처리
                         if reach_frame_count >= REQUIRED_REACH_FRAMES:
                             print(f"✨ [획득 성공!] {target_kor}을(를) 집어 들었습니다! ({reach_frame_count}프레임 연속 도달)")
                             audio_service.say(f"{target_kor}을(를) 찾았습니다.")
@@ -359,6 +386,7 @@ def main():
                             locked_center = None
                             missing_frame_count = 0
                             reach_frame_count = 0
+                            no_hand_since = None
                             continue
 
                         if found_target is None and not hand_near_target and missing_frame_count > 45:
@@ -370,6 +398,7 @@ def main():
                             locked_center = None
                             missing_frame_count = 0
                             reach_frame_count = 0
+                            no_hand_since = None
                             continue
 
                         is_occluded = (found_target is None)
