@@ -9,7 +9,7 @@ import sys
 import time
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from ble_sender.cli import Inbox, transmit
@@ -281,12 +281,65 @@ class AsyncTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(predicate(device, SimpleNamespace(local_name=NAME, service_uuids=[SERVICE])))
             return device
 
-        module = SimpleNamespace(BleakClient=lambda _: client, BleakScanner=SimpleNamespace(find_device_by_filter=find))
+        factory = Mock(return_value=client)
+        module = SimpleNamespace(BleakClient=factory, BleakScanner=SimpleNamespace(find_device_by_filter=find))
         with patch.dict(sys.modules, bleak=module), patch("builtins.print"):
             async with Link():
                 self.assertEqual(PACKET.unpack(client.writes[0][1])[1], 1)
         self.assertEqual(len(client.writes), 2)
         self.assertFalse(client.is_connected)
+        self.assertEqual(factory.call_args.kwargs["timeout"], 30)
+
+    async def test_connect_timeout_names_stage_and_disconnects(self):
+        client = FakeClient()
+        client.connect = AsyncMock(side_effect=TimeoutError())
+        module = SimpleNamespace(
+            BleakClient=lambda *a, **kw: client,
+            BleakScanner=SimpleNamespace(
+                find_device_by_address=AsyncMock(return_value=SimpleNamespace(address="AA:BB:CC:DD:EE:FF"))
+            ),
+        )
+        with patch.dict(sys.modules, bleak=module), patch("builtins.print"):
+            with self.assertRaisesRegex(RuntimeError, "연결·GATT 서비스 확인 시간 초과") as caught:
+                async with Link("AA:BB:CC:DD:EE:FF"):
+                    self.fail("connection should fail")
+        self.assertIsInstance(caught.exception.__cause__, TimeoutError)
+        self.assertFalse(client.is_connected)
+
+    async def test_status_timeout_is_not_reported_as_connection_timeout(self):
+        client = FakeClient()
+        client.connect = AsyncMock()
+        client.read_gatt_char = AsyncMock(side_effect=TimeoutError())
+        module = SimpleNamespace(
+            BleakClient=lambda *a, **kw: client,
+            BleakScanner=SimpleNamespace(
+                find_device_by_address=AsyncMock(return_value=SimpleNamespace(address="AA:BB:CC:DD:EE:FF"))
+            ),
+        )
+        with patch.dict(sys.modules, bleak=module), patch("builtins.print"):
+            with self.assertRaisesRegex(RuntimeError, "초기 상태 읽기 시간 초과"):
+                async with Link("AA:BB:CC:DD:EE:FF"):
+                    self.fail("status should fail")
+        self.assertFalse(client.is_connected)
+
+    async def test_cleanup_error_does_not_hide_original_connect_timeout(self):
+        client = FakeClient()
+        client.connect = AsyncMock(side_effect=TimeoutError())
+        client.disconnect = AsyncMock(side_effect=OSError("cleanup failed"))
+        module = SimpleNamespace(
+            BleakClient=lambda *a, **kw: client,
+            BleakScanner=SimpleNamespace(
+                find_device_by_address=AsyncMock(return_value=SimpleNamespace(address="AA:BB:CC:DD:EE:FF"))
+            ),
+        )
+        with (
+            patch.dict(sys.modules, bleak=module),
+            patch("builtins.print"),
+            self.assertLogs("ble_sender.link", "ERROR"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "연결·GATT 서비스 확인 시간 초과"):
+                async with Link("AA:BB:CC:DD:EE:FF"):
+                    self.fail("connection should fail")
 
     async def test_ble_sequences_wrap_and_cleanup_stop(self):
         link = Link()

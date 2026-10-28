@@ -166,7 +166,11 @@ async def run(args, *, ready=None, stop_requested=None):
 
     watcher = asyncio.create_task(watch_owner()) if stop_requested is not None else None
     try:
-        async with ConsoleLink() if args.dry_run else Link(args.address) as link:
+        async with (
+            ConsoleLink()
+            if args.dry_run
+            else Link(args.address, scan_timeout=args.scan_timeout, connect_timeout=args.connect_timeout) as link
+        ):
             print(f"영상 입력: {HOST}:{args.port} | mode={args.mode} | 왼손 장갑", flush=True)
             print("명령: mode 2 / mode 3 / status / stop / resume / quit", flush=True)
             if args.allow_test:
@@ -190,6 +194,8 @@ def parser():
     p = argparse.ArgumentParser(description="김가네 왼손 장갑 BLE v2 송신부")
     p.add_argument("--mode", type=int, choices=(2, 3), default=2)
     p.add_argument("--address", help="ESP BLE 주소. 생략하면 이름/서비스로 검색")
+    p.add_argument("--scan-timeout", type=float, default=10, help="BLE 검색 제한(초), 기본 10")
+    p.add_argument("--connect-timeout", type=float, default=30, help="연결·서비스 확인 제한(초), 기본 30")
     p.add_argument("--port", type=int, default=PORT, help="Pi 내부 UDP 포트")
     p.add_argument("--dry-run", action="store_true", help="BLE 없이 매핑/패킷만 검사")
     p.add_argument("--allow-test", action="store_true", help="최대 2초 독립 모터 시험 허용")
