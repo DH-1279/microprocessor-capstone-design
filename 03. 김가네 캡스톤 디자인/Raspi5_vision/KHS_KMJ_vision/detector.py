@@ -313,17 +313,17 @@ def main():
                     if command_text:
                         intent = speech.parse_input(command_text, TARGET_MAPPING, state="guiding")
                         if intent.kind == "control":
-                            # (5) 추적 중간에 "취소" 등의 명령 시 안내 종료 후 (2)번 상태(WAIT_TARGET)로 복귀하여 다시 멘트
+                            # (5) 추적 중간에 "취소" 등의 명령 시 안내 종료 후 처음 대기 상태(WAIT_WAKE)로 복귀
                             if intent.name == "stop":
-                                print("⏹️ 사용자 요청으로 안내를 종료하고 물건 선택 단계로 복귀합니다.")
-                                state = "WAIT_TARGET"
+                                print("⏹️ 사용자 요청으로 안내를 중지하고 처음 대기 상태로 복귀합니다.")
+                                state = "WAIT_WAKE"
                                 target_eng_label = None
                                 locked_target_box = None
                                 locked_center = None
                                 missing_frame_count = 0
                                 reach_frame_count = 0
                                 no_hand_since = None
-                                audio_service.say(f"안내를 종료합니다. {format_prompt_target_speech(current_korean_list)}")
+                                audio_service.say("안내를 중지합니다. 다시 부르시려면 캡스톤이라고 말씀해주세요.")
                                 continue
                             # (3) 추적 중에도 "리스트"를 외치면 동일하게 안내
                             elif intent.name == "list":
@@ -388,7 +388,6 @@ def main():
                         # (4) 손이 목표 물건에 도달할 때까지 진행 후 완료 처리 (찾은 경우 시동어 대기 상태로 복귀)
                         if reach_frame_count >= REQUIRED_REACH_FRAMES:
                             print(f"✨ [획득 성공!] {target_kor}을(를) 집어 들었습니다! ({reach_frame_count}프레임 연속 도달)")
-                            # 물건을 찾은 후 시동어를 다시 말하도록 대기 상태(WAIT_WAKE)로 전환
                             state = "WAIT_WAKE"
                             target_eng_label = None
                             locked_target_box = None
