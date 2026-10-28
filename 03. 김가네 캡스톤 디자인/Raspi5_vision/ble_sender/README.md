@@ -31,7 +31,7 @@ ESP 연결 후 시동어·목표 선택을 기다리며, 락온한 목표와 이
 
 `--dry-run`은 BLE 없이 영상과 패킷 매핑을 검사하고, `--no-ble`은 영상·음성만 실행한다. ESP의 `DRY_RUN` 펌웨어 설정과는 다르다. 독립 모터 시험은 `python -m ble_sender --allow-test`로 가능하며, detector와 동시에 켜지 않는다.
 
-연결·GATT·초기 STOP만 먼저 확인하려면 `python -m ble_sender.check_link --address ESP주소`를 실행한다. 카메라와 음성은 열지 않고 STOP과 상태 읽기만 수행한 뒤 종료한다. 초기 I/O는 5초, 안내 중 쓰기는 0.3초로 제한한다.
+연결·GATT·초기 STOP만 먼저 확인하려면 `python -m ble_sender.check_link --address ESP주소`를 실행한다. 카메라와 음성은 열지 않고 STOP과 상태 읽기만 수행한 뒤 종료한다. 초기 I/O는 5초, 안내 중 쓰기 응답은 1초로 제한한다. ESP TTL 500ms는 그대로이며 ACK 대기가 모터 출력 시간을 연장하지 않는다.
 
 ```bash
 python -m unittest discover -s ble_sender/tests -v
