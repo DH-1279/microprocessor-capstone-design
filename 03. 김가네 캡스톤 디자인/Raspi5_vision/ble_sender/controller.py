@@ -9,6 +9,7 @@ from time import monotonic
 from .guidance import Mapper, fresh_cue
 from .protocol import Channel, Cue, Mode, Zone
 from .publisher import MAX_DATAGRAM
+from .arrival import valid_palm_observation
 
 
 def integer(value, minimum=0):
@@ -121,6 +122,10 @@ class Controller:
             ):
                 raise ValueError("stale, unmatched or invalid observation")
             self.last_frame, self.last_capture = frame_id, captured
+            seen = packet.get("target_seen_at", captured)
+            if (type(seen) not in (int, float) or not math.isfinite(seen)
+                    or not 0 <= captured - seen or not 0 <= now - seen):
+                raise ValueError("invalid locked target timestamp")
             if self.paused:
                 return True
             if target_id != self.target_id:
@@ -140,10 +145,9 @@ class Controller:
                 if target_id in self.completed:
                     self.guidance = None
                     return True
-                # Validate geometry independently of direction stabilization.
-                validator = Mapper(mode=3, stable_frames=1, max_age=self.mapper.max_age)
-                if validator.update(packet.get("landmarks"), packet.get("target_box"), captured,
-                                    now, packet.get("size")) is None:
+                # Acquisition needs a valid palm, not a palm/back direction axis.
+                if not valid_palm_observation(packet.get("landmarks"), packet.get("target_box"), captured,
+                                              now, packet.get("size"), self.mapper.max_age):
                     raise ValueError("invalid arrival observation")
                 self.completed.append(target_id)
                 self.event_id = self.event_id % 65535 + 1
@@ -151,14 +155,14 @@ class Controller:
                                        Channel.MI if self.mode == Mode.DIRECTION else Channel.IN,
                                        (255,) * 5, arrival_id=self.event_id)
                 # A finite event is not a stream of refreshed camera positions.
-                # Firmware runs exactly 450ms once; allow delivery/ACK latency.
-                self.arrival_until = now + 1.5
+                # Firmware runs exactly 900ms once; allow delivery/ACK latency.
+                self.arrival_until = now + 1.9
                 self.guidance = None
-                self.reason = "목표 영역 도달: 다섯 손가락 최대 PWM 두 번"
+                self.reason = "획득: 다섯 손가락 최대 PWM, 350ms씩 두 번"
                 return True
             if target_id in self.completed:
                 self.guidance = None
-            self.reason = "안내" if self.guidance else "손 좌표 검증 / 방향 안정화 중"
+            self.reason = ("잠금 위치 안내 (목표 가림/미검출)" if seen < captured else "안내") if self.guidance else "손 좌표 검증 / 방향 안정화 중"
             return True
         except (ValueError, TypeError, KeyError, UnicodeError, RecursionError):
             self.clear("잘못되거나 오래된 영상 입력: 정지")

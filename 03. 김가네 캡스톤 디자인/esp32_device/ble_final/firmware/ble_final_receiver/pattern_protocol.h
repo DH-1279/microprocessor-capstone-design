@@ -116,7 +116,7 @@ class State {
     out[9] = 0;
     for (size_t i = 0; i < kChannels; ++i) if (outputs_[i]) out[9] = 1;
     for (size_t i = 0; i < kChannels; ++i) out[10 + i] = outputs_[i];
-    out[15] = 3;  // bit0 independent rate channels, bit1 arrival event.
+    out[15] = 7;  // multi-rate, arrival event, 350ms double/repeating near.
   }
 
  private:
@@ -125,7 +125,7 @@ class State {
     if (!active_ || fault_) return;
     const uint32_t elapsed = static_cast<uint32_t>(now - phaseStart_);
     if (kind_ == kArrival) {
-      if (elapsed < 150 || (elapsed >= 300 && elapsed < 450))
+      if (elapsed < 350 || (elapsed >= 550 && elapsed < 900))
         for (size_t i = 0; i < kChannels; ++i) outputs_[i] = 255;
       return;
     }
@@ -137,10 +137,7 @@ class State {
       return;
     }
     bool on;
-    if (mode_ == Direction && zone_ == Near) {
-      // One double tap on entry. Near is NOT proof of contact or grasp.
-      on = elapsed < 120 || (elapsed >= 240 && elapsed < 360);
-    } else {
+    {
       const uint32_t periods[] = {1200, 700, 400};  // ON=200ms, OFF=1000/500/200.
       on = elapsed % periods[zone_] < 200;
     }

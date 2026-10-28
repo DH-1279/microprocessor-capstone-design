@@ -14,7 +14,11 @@ def detector_arguments(argv=None):
     parser = sender_parser()
     parser.description = "영상·음성 안내와 ESP32 BLE 자동 연결"
     parser.add_argument("--no-ble", action="store_true", help="ESP 없이 영상·음성만 실행")
+    parser.add_argument("--reach-px", type=float, default=50.0, help="손바닥/목표 중심 획득 거리(px), 기본 50")
+    parser.add_argument("--reach-frames", type=int, default=5, help="획득에 필요한 연속 유효 프레임, 기본 5")
     args = parser.parse_args(argv)
+    if not math.isfinite(args.reach_px) or args.reach_px <= 0 or args.reach_frames < 1:
+        parser.error("획득 거리와 프레임 수는 0보다 커야 합니다.")
     if not 1 <= args.port <= 65535:
         parser.error("포트는 1..65535")
     if any(not math.isfinite(value) or value <= 0 for value in (args.scan_timeout, args.connect_timeout)):

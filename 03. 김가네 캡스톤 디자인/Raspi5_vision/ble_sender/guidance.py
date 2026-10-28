@@ -61,6 +61,7 @@ class Mapper:
         self.channel = None
         self.pending = None
         self.count = 0
+        self.confirmed_cue = None
         self.finger_zones = [None] * 5
 
     def _zone(self, d):
@@ -167,7 +168,10 @@ class Mapper:
             else:
                 self.pending, self.count = candidate, 1
             if self.count < self.stable_frames:
-                # Do not continue the old direction during an unconfirmed switch.
+                # Keep the previous confirmed cue during a brief direction vote,
+                # only while the CURRENT hand/lock geometry remains valid.
+                if self.mode == Mode.DIRECTION and self.confirmed_cue is not None:
+                    return Guidance(self.confirmed_cue, captured_at, facing, distance, side, forward)
                 return None
             self.channel = candidate
             zones = None
@@ -182,8 +186,9 @@ class Mapper:
                 self.finger_zones = zones
                 self.zone = saved_zone
                 zones = tuple(zones)
+            self.confirmed_cue = Cue(self.mode, self.zone, candidate, self.duties, zones=zones)
             return Guidance(
-                Cue(self.mode, self.zone, candidate, self.duties, zones=zones),
+                self.confirmed_cue,
                 captured_at,
                 facing,
                 distance,

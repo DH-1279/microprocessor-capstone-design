@@ -23,7 +23,7 @@ from hand_tracker import HandTracker, draw_hand
 from audio import AudioService
 import speech  # 문법 및 자모 편집 거리 기반 음성 파서
 from ble_sender.integration import DetectorBLE, detector_arguments
-from ble_sender.arrival import ArrivalGate
+from ble_sender.arrival import ArrivalGate, palm_center
 
 # ==========================================
 # [긴급 패치 1] HailoRT physical.identify().device_architecture 우회
@@ -105,7 +105,6 @@ TARGET_MAPPING = {
 WAKE_WORDS = ("캡스톤", "갭스톤", "캡손", "캐스톤", "캡스", "캡스턴")
 WAKE_THRESHOLD = 0.35
 
-ARRIVAL_DWELL = 0.4  # Same fingertip inside the inner box; image-plane arrival only.
 MAX_JUMP_DIST = 150.0         
 HAND_MISSING_ALERT_INTERVAL = 5.0  # 손 미인식 시 안내 주기 (5초)
 
@@ -212,10 +211,11 @@ def main(argv=None):
     frame_id = 0
     pending_ble_notice = False
     pending_arrival_message = None
-    arrival_gate = ArrivalGate(dwell=ARRIVAL_DWELL, max_age=arguments.max_age)
+    arrival_gate = ArrivalGate(threshold=arguments.reach_px, frames=arguments.reach_frames, max_age=arguments.max_age)
     
     locked_target_box = None     
     locked_center = None         
+    locked_seen_at = None
     missing_frame_count = 0      
     no_hand_since = None  # 손 미인식 시작 시각 기록용 타이머
 
@@ -316,6 +316,7 @@ def main(argv=None):
                                 found_target = next((det for det in obj_detections if det.label == target_eng_label), None)
                                 if found_target:
                                     locked_target_box = found_target.box
+                                    locked_seen_at = timestamp
                                     x1, y1, x2, y2 = locked_target_box
                                     locked_center = (int(((x1 + x2) / 2) * width), int(((y1 + y2) / 2) * height))
                                 missing_frame_count = 0
@@ -398,6 +399,7 @@ def main(argv=None):
 
                     if found_target:
                         locked_target_box = found_target.box
+                        locked_seen_at = timestamp
                         x1, y1, x2, y2 = locked_target_box
                         locked_center = (int(((x1 + x2) / 2) * width), int(((y1 + y2) / 2) * height))
                         missing_frame_count = 0
@@ -408,24 +410,26 @@ def main(argv=None):
                         center_x, center_y = locked_center
 
                         arrived = arrival_gate.update(
-                            lock_id, landmarks, found_target.box if found_target else None,
+                            lock_id, landmarks, locked_target_box,
                             timestamp, time.monotonic(), (width, height),
+                            target_seen_at=locked_seen_at,
                         )
                         if arrived:
                             ble.arrive(target_id=lock_id, frame_id=frame_id,
                                        captured_at=timestamp, size=(width, height),
-                                       landmarks=landmarks, target_box=found_target.box)
-                            print(f"✨ [목표 영역 도달] {target_kor}: 같은 손가락이 안쪽 영역에 {ARRIVAL_DWELL}초 유지. 실제 파지 판정은 아닙니다.")
+                                       landmarks=landmarks, target_box=locked_target_box,
+                                       target_seen_at=locked_seen_at)
+                            print(f"✨ [획득 판정] {target_kor}: 손바닥/목표 중심 {arrival_gate.distance:.1f}px, {arrival_gate.count}프레임 연속 (영상 기준)")
                             state = "WAIT_WAKE"
                             target_eng_label = None
                             locked_target_box = None
                             locked_center = None
                             missing_frame_count = 0
                             no_hand_since = None
-                            pending_arrival_message = f"{target_kor}의 목표 위치에 도달했습니다. 다른 물건을 찾으려면 캡스톤을 말씀해주세요."
+                            pending_arrival_message = f"{target_kor}을 획득했습니다. 다른 물건을 찾으려면 캡스톤을 말씀해주세요."
                             continue
 
-                        if found_target is None and missing_frame_count > 45:
+                        if locked_seen_at is None:
                             ble.stop()
                             print(f"⚠️ {target_kor}을(를) 장시간 찾을 수 없어 타겟을 해제합니다.")
                             audio_service.say("물건을 찾을 수 없습니다. 다시 말씀해 주세요.")
@@ -438,8 +442,13 @@ def main(argv=None):
                             continue
 
                         is_occluded = (found_target is None)
-                        status_str = " (⚠️ 목표 미검출: 진동 안내 일시 정지)" if is_occluded else ""
+                        status_str = " (LOCKED: 마지막 목표 위치로 안내 계속)" if is_occluded else ""
                         print(f"\n🎯 [탐색 중{status_str}] 목표: {target_kor} | 중심: ({center_x}, {center_y})")
+                        if arrival_gate.distance is not None:
+                            print(f"    손바닥 중심 거리={arrival_gate.distance:.1f}px | 획득 유지={arrival_gate.count}/{arguments.reach_frames}")
+                            put_readable_text(display_frame, f"Palm-target: {arrival_gate.distance:.1f}px | Grab: {arrival_gate.count}/{arguments.reach_frames}", (20, 70), font_scale=0.6)
+                            palm_x, palm_y = palm_center(landmarks)
+                            cv2.circle(display_frame, (int(palm_x * width), int(palm_y * height)), 7, (255, 0, 255), -1)
 
                         if landmarks is not None:
                             coord_strs = []
@@ -468,15 +477,19 @@ def main(argv=None):
                     else:
                         print(f"⚠️ {target_kor}의 위치를 찾을 수 없습니다.")
 
+                guidance_box = found_target.box if found_target is not None else locked_target_box
+                guidance_seen_at = timestamp if found_target is not None else locked_seen_at
+                lock_valid = guidance_seen_at is not None and 0 <= timestamp - guidance_seen_at
                 ble.publish(
-                    active=(state == "SEARCHING" and found_target is not None
+                    active=(state == "SEARCHING" and lock_valid and guidance_box is not None
                             and landmarks is not None),
                     target_id=lock_id,
                     frame_id=frame_id,
                     captured_at=timestamp,
                     size=(width, height),
                     landmarks=landmarks,
-                    target_box=found_target.box if found_target is not None else None,
+                    target_box=guidance_box,
+                    target_seen_at=guidance_seen_at,
                 )
 
                 if obj_detections:
