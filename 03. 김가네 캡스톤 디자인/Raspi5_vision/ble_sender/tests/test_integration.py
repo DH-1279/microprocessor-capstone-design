@@ -325,7 +325,7 @@ class DetectorLoopTests(unittest.TestCase):
         sent, packets = [], []
 
         class FakeLink:
-            def __init__(self, address=None):
+            def __init__(self, address=None, **kwargs):
                 pass
 
             async def __aenter__(self):
@@ -353,6 +353,24 @@ class DetectorLoopTests(unittest.TestCase):
 
 
 class LifecycleTests(unittest.TestCase):
+    def test_startup_budget_covers_scan_and_connection(self):
+        runtime = DetectorBLE(detector_arguments(["--no-console"]))
+        runtime.ready = SimpleNamespace(wait=Mock(return_value=True))
+        worker = SimpleNamespace(start=Mock(), join=Mock(), is_alive=Mock(side_effect=[True, False]))
+        with (
+            patch("ble_sender.integration.threading.Thread", return_value=worker),
+            patch("ble_sender.integration.VisionPublisher"),
+        ):
+            runtime.start()
+            runtime.ready.wait.assert_called_once_with(52)
+            runtime.close()
+
+    def test_empty_exception_still_reports_its_type(self):
+        runtime = DetectorBLE(detector_arguments([]))
+        runtime.error = TimeoutError()
+        with self.assertRaisesRegex(RuntimeError, "TimeoutError"):
+            runtime.check()
+
     def test_no_ble_is_explicit_and_starts_no_thread(self):
         runtime = DetectorBLE(detector_arguments(["--no-ble"]))
         runtime.start()
@@ -376,7 +394,7 @@ class LifecycleTests(unittest.TestCase):
         entered = threading.Event()
 
         class PendingLink:
-            def __init__(self, address=None):
+            def __init__(self, address=None, **kwargs):
                 pass
 
             async def __aenter__(self):

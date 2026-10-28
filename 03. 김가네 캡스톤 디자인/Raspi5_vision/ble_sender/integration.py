@@ -1,6 +1,7 @@
 """Lifecycle owned by detector.py; the BLE loop never runs on the vision thread."""
 
 import asyncio
+import math
 import threading
 
 from .cli import parser as sender_parser, run
@@ -14,6 +15,8 @@ def detector_arguments(argv=None):
     args = parser.parse_args(argv)
     if not 1 <= args.port <= 65535:
         parser.error("포트는 1..65535")
+    if any(not math.isfinite(value) or value <= 0 for value in (args.scan_timeout, args.connect_timeout)):
+        parser.error("BLE 검색·연결 제한은 0보다 큰 유한한 초 값이어야 합니다.")
     return args
 
 
@@ -51,7 +54,10 @@ class DetectorBLE:
             raise RuntimeError("BLE sender already started")
         self.thread = threading.Thread(target=self._worker, name="detector-ble", daemon=True)
         self.thread.start()
-        if not self.ready.wait(30):
+        # Budget includes scanning, connection, initial I/O and cleanup. It
+        # must not cancel a legitimate 30s connection after only 30s total.
+        startup_timeout = self.args.scan_timeout + self.args.connect_timeout + 12
+        if not self.ready.wait(startup_timeout):
             self.close()
             raise TimeoutError("BLE 초기화 시간 초과: ESP 전원과 Bluetooth를 확인하세요.")
         if not self.check():
@@ -60,7 +66,8 @@ class DetectorBLE:
 
     def check(self):
         if self.error is not None:
-            raise RuntimeError(f"BLE 송신부 오류: {self.error}") from self.error
+            detail = str(self.error).strip() or type(self.error).__name__
+            raise RuntimeError(f"BLE 송신부 오류: {detail}") from self.error
         return self.args.no_ble or (self.thread is not None and self.thread.is_alive())
 
     def stop(self):
