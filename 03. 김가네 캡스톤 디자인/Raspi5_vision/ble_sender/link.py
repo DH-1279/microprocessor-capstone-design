@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import math
+from time import monotonic
 
 from .protocol import COMMAND, NAME, SERVICE, STATUS, Status, encode
 
@@ -23,6 +24,7 @@ class Link:
             raise ValueError("BLE 제한 시간은 0보다 큰 유한한 초 값이어야 합니다.")
         self.address, self.client, self.sequence = address, None, 0
         self.scan_timeout, self.connect_timeout = scan_timeout, connect_timeout
+        self.last_operation = "초기화"
 
     async def __aenter__(self):
         from bleak import BleakClient, BleakScanner
@@ -82,13 +84,34 @@ class Link:
 
     async def _write(self, cue, timeout):
         if self.client is None or not self.client.is_connected:
-            raise RuntimeError("BLE disconnected")
+            raise ConnectionError("BLE 연결이 끊어졌습니다.")
         data = encode(self.sequence, cue)
+        self.last_operation = (
+            f"명령 쓰기 seq={self.sequence} STOP"
+            if cue is None
+            else f"명령 쓰기 seq={self.sequence} mode={int(cue.mode)} zone={int(cue.zone)} "
+            f"ch={int(cue.channel)} duty={cue.duties[cue.channel]}"
+        )
         self.sequence = (self.sequence + 1) & 65535
-        await asyncio.wait_for(self.client.write_gatt_char(COMMAND, data, response=True), timeout)
+        started = monotonic()
+        try:
+            await asyncio.wait_for(self.client.write_gatt_char(COMMAND, data, response=True), timeout)
+        except TimeoutError as error:
+            raise TimeoutError(
+                f"{self.last_operation} | 응답 {monotonic() - started:.3f}초 초과 (제한 {timeout:g}초)"
+            ) from error
+        except Exception as error:
+            raise ConnectionError(f"{self.last_operation} 실패: {type(error).__name__}: {error}") from error
 
     async def status(self, *, timeout=2):
-        result = Status.decode(await asyncio.wait_for(self.client.read_gatt_char(STATUS), timeout))
+        self.last_operation = "상태 읽기"
+        try:
+            data = await asyncio.wait_for(self.client.read_gatt_char(STATUS), timeout)
+        except TimeoutError as error:
+            raise TimeoutError(f"BLE 상태 읽기 응답 시간 초과 (제한 {timeout:g}초)") from error
+        except Exception as error:
+            raise ConnectionError(f"BLE 상태 읽기 실패: {type(error).__name__}: {error}") from error
+        result = Status.decode(data)
         if not result.flags & 1 or result.flags & (8 | 32):
             raise RuntimeError(f"ESP 연결/명령/하드웨어 오류: flags={result.flags:#x}")
         return result
@@ -106,5 +129,10 @@ class Link:
                 finally:
                     self.client = None
 
-    async def __aexit__(self, *_):
-        await self.close()
+    async def __aexit__(self, exc_type, exc, _):
+        try:
+            await self.close(send_stop=not isinstance(exc, (TimeoutError, ConnectionError)))
+        except Exception:
+            if exc is None:
+                raise
+            logger.exception("BLE 종료 중 오류: 원래 통신 오류를 유지합니다.")

@@ -210,6 +210,7 @@ def main(argv=None):
     target_eng_label = None
     lock_id = None
     frame_id = 0
+    pending_ble_notice = False
     
     locked_target_box = None     
     locked_center = None         
@@ -246,6 +247,12 @@ def main(argv=None):
                 if not ble.check():
                     print("BLE 터미널 종료 요청: 전체 프로그램을 종료합니다.")
                     break
+                notice = ble.pop_notice()
+                if notice:
+                    print(f"진동 안내 통신 중단: {notice}")
+                    pending_ble_notice = True
+                if pending_ble_notice and audio_service.say("진동 안내가 중단되었습니다. 연결 상태를 확인해주세요."):
+                    pending_ble_notice = False
                 read_result = cam.read()
                 if read_result is None:
                     ble.stop()

@@ -21,10 +21,13 @@ mode 3
 status
 stop
 resume
+reconnect
 quit
 ```
 
 ESP 연결 후 시동어·목표 선택을 기다리며, 락온한 목표와 이번 프레임의 유효한 손이 있을 때만 안내한다. 취소·도달·상실·종료 때 정지한다. `quit`는 BLE와 detector를 함께 종료한다.
+
+안내 중 통신이 늦거나 끊기면 진동 연결을 해제하고 영상·음성은 유지한다. 터미널의 `reconnect`로 다시 연결한 뒤 `resume`을 입력해야 새 프레임으로 진동을 재개한다. 자동 재연결·재개는 하지 않는다.
 
 `--dry-run`은 BLE 없이 영상과 패킷 매핑을 검사하고, `--no-ble`은 영상·음성만 실행한다. ESP의 `DRY_RUN` 펌웨어 설정과는 다르다. 독립 모터 시험은 `python -m ble_sender --allow-test`로 가능하며, detector와 동시에 켜지 않는다.
 
