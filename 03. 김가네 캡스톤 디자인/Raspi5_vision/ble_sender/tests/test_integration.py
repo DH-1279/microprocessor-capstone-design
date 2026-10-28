@@ -12,7 +12,7 @@ import threading
 import time
 from types import ModuleType, SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from ble_sender.integration import DetectorBLE, detector_arguments
@@ -32,6 +32,18 @@ class Frame:
 
 class FakeCV(ModuleType):
     COLOR_RGB2BGR = FONT_HERSHEY_SIMPLEX = LINE_AA = 0
+    WINDOW_NORMAL = WND_PROP_FULLSCREEN = 0
+    WINDOW_FULLSCREEN = 1
+
+    def __init__(self, name):
+        super().__init__(name)
+        self.window_requests = []
+
+    def namedWindow(self, name, flags=0):
+        self.window_requests.append(("window", name, flags))
+
+    def setWindowProperty(self, name, key, value):
+        self.window_requests.append(("property", name, key, value))
 
     def cvtColor(self, frame, code):
         return frame
@@ -142,6 +154,7 @@ def replay(rows, *, real_runtime=False, fail_audio=False):
     clock = [0.0]
     spoken, states = [], []
     state = SimpleNamespace(bridge=None, audio_closed=False)
+    volume = Mock(return_value=SimpleNamespace(returncode=0))
 
     class Audio:
         def __init__(self, config, on_text):
@@ -217,6 +230,7 @@ def replay(rows, *, real_runtime=False, fail_audio=False):
         DetectorBLE=bridge,
         draw_hand=lambda *a: None,
         put_readable_text=overlay,
+        subprocess=SimpleNamespace(run=volume, DEVNULL=-3),
     )
     if not real_runtime:
         updates["time"] = SimpleNamespace(monotonic=lambda: clock[0])
@@ -230,20 +244,51 @@ def replay(rows, *, real_runtime=False, fail_audio=False):
         audio_closed=state.audio_closed,
         code=exit_code,
         log=output.getvalue(),
+        volume_calls=volume.call_args_list,
+        window_requests=module.cv2.window_requests,
     )
 
 
 class DetectorLoopTests(unittest.TestCase):
     def test_wake_lock_cancel_and_relock_use_current_frame_and_new_lock_id(self):
-        run = replay([{}, {"text": "캡스톤"}, {"text": "컵"}, {}, {"text": "취소"}, {}, {"text": "컵"}, {}])
+        run = replay(
+            [
+                {},
+                {"text": "캡스톤"},
+                {"text": "컵"},
+                {},
+                {"text": "취소"},
+                {"text": "컵"},
+                {"text": "캡스톤"},
+                {"text": "컵"},
+                {},
+            ]
+        )
         active = [record for record in run.bridge.sent if record is not None]
-        self.assertEqual([record["frame_id"] for record in active], [3, 4, 7, 8])
+        self.assertEqual([record["frame_id"] for record in active], [3, 4, 8, 9])
         self.assertEqual(active[0]["target_id"], active[1]["target_id"])
         self.assertNotEqual(active[0]["target_id"], active[2]["target_id"])
         self.assertEqual(active[0]["size"], (1280, 720))
         self.assertEqual(run.states[-1], "SEARCHING")
         self.assertTrue(run.bridge.closed and run.audio_closed)
         self.assertEqual(run.code, 0)
+
+    def test_cancel_requires_wake_word_before_selecting_another_target(self):
+        run = replay([{"text": "캡스톤"}, {"text": "컵"}, {"text": "취소"}, {"text": "컵"}, {}])
+        active = [record for record in run.bridge.sent if record is not None]
+        self.assertEqual([record["frame_id"] for record in active], [2])
+        self.assertEqual(run.states[-1], "WAIT_WAKE")
+        self.assertTrue(all(record is None for record in run.bridge.sent[2:]))
+        self.assertTrue(any("다시 부르시려면 캡스톤" in text for text in run.spoken))
+
+    def test_latest_fullscreen_and_volume_setup_are_preserved(self):
+        run = replay([{}])
+        self.assertIn(("property", "Capstone Vision Controller", 0, 1), run.window_requests)
+        self.assertEqual(
+            [call.args[0] for call in run.volume_calls],
+            [["amixer", "-c", "3", "set", "PCM", "100%"], ["amixer", "set", "Master", "100%"]],
+        )
+        self.assertTrue(all(call.kwargs["timeout"] == 2 for call in run.volume_calls))
 
     def test_lost_held_stale_hand_or_missing_target_send_stop(self):
         for invalid in ({"valid": False}, {"valid": False, "held": True}, {"age": 1}, {"objects": []}):

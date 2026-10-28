@@ -6,6 +6,7 @@ import queue
 import time
 import traceback
 import uuid
+import subprocess
 from pathlib import Path
 
 # PortAudio(sounddevice)가 hw 대신 plughw를 사용하도록 강제
@@ -221,6 +222,14 @@ def main(argv=None):
 
     try:
         ble.start()
+        # 기존 볼륨 설정을 유지하되 믹서 응답 때문에 초기화가 멈추지 않게 한다.
+        try:
+            subprocess.run(["amixer", "-c", "3", "set", "PCM", "100%"],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2)
+            subprocess.run(["amixer", "set", "Master", "100%"],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2)
+        except Exception:
+            pass
         audio_service.start()
         print("초기화 완료. 시동어 '캡스톤'을 기다리는 중...")
         audio_service.say("시스템이 준비되었습니다. 캡스톤이라고 말씀해주세요.")
@@ -229,7 +238,8 @@ def main(argv=None):
              HandTracker(config) as tracker:
              
             window_name = "Capstone Vision Controller"
-            cv2.namedWindow(window_name)
+            cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+            cv2.setWindowProperty(window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN) # 디스플레이 화면에 꽉 차게 전체 화면 설정
             cv2.moveWindow(window_name, 50, 50)
             
             while True:
@@ -319,18 +329,18 @@ def main(argv=None):
                     if command_text:
                         intent = speech.parse_input(command_text, TARGET_MAPPING, state="guiding")
                         if intent.kind == "control":
-                            # (5) 추적 중간에 "취소" 등의 명령 시 안내 종료 후 (2)번 상태(WAIT_TARGET)로 복귀하여 다시 멘트
+                            # (5) 추적 중간에 "취소" 등의 명령 시 안내 종료 후 처음 대기 상태(WAIT_WAKE)로 복귀
                             if intent.name == "stop":
                                 ble.stop()
-                                print("⏹️ 사용자 요청으로 안내를 종료하고 물건 선택 단계로 복귀합니다.")
-                                state = "WAIT_TARGET"
+                                print("⏹️ 사용자 요청으로 안내를 중지하고 처음 대기 상태로 복귀합니다.")
+                                state = "WAIT_WAKE"
                                 target_eng_label = None
                                 locked_target_box = None
                                 locked_center = None
                                 missing_frame_count = 0
                                 reach_frame_count = 0
                                 no_hand_since = None
-                                audio_service.say(f"안내를 종료합니다. {format_prompt_target_speech(current_korean_list)}")
+                                audio_service.say("안내를 중지합니다. 다시 부르시려면 캡스톤이라고 말씀해주세요.")
                                 continue
                             # (3) 추적 중에도 "리스트"를 외치면 동일하게 안내
                             elif intent.name == "list":
@@ -391,11 +401,10 @@ def main(argv=None):
                         else:
                             reach_frame_count = 0
 
-                        # (4) 손이 목표 물건에 도달할 때까지 진행 후 완료 처리
+                        # (4) 손이 목표 물건에 도달할 때까지 진행 후 완료 처리 (찾은 경우 시동어 대기 상태로 복귀)
                         if reach_frame_count >= REQUIRED_REACH_FRAMES:
                             ble.stop()
                             print(f"✨ [획득 성공!] {target_kor}을(를) 집어 들었습니다! ({reach_frame_count}프레임 연속 도달)")
-                            audio_service.say(f"{target_kor}을(를) 찾았습니다.")
                             state = "WAIT_WAKE"
                             target_eng_label = None
                             locked_target_box = None
@@ -403,6 +412,7 @@ def main(argv=None):
                             missing_frame_count = 0
                             reach_frame_count = 0
                             no_hand_since = None
+                            audio_service.say(f"{target_kor}을 찾았습니다. 다른 물건을 찾으려면 캡스톤을 말씀해주세요.")
                             continue
 
                         if found_target is None and not hand_near_target and missing_frame_count > 45:
