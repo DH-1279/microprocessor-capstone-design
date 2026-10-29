@@ -4,7 +4,7 @@ ESP의 `ble_final_receiver`용 송신부다. `KHS_KMJ_vision/detector.py`를 실
 
 개인 QA 브랜치에서는 ESP 미연결 상태로도 앱을 실행하며 **자동 연결·재연결**한다. 새 손 프레임으로 자동 재개하되 명시적 stop과 이전 완료 이벤트는 보존/차단한다. 수동 점검은 `--manual-reconnect`다. [10월 30일 QA 변경·시험 절차](../../docs/2026-10-30_DH_QA_음성입력_BLE자동연결.md)를 우선 참고한다.
 
-현재 기본값은 **mode 3 방향 안내**다. 물체가 가려져도 잠금 위치로 안내하며, 손바닥/목표 중심이 50px 이내에서 5프레임 유지되면 획득으로 판정한다. 다섯 채널 duty 255로 350ms씩 두 번 울린다. mode 2 다중 주기도 유지한다. **ESP도 최신 펌웨어를 다시 업로드해야 한다.** 구형 수신기는 초기 STOP 이후 기능 확인에서 차단한다.
+현재 기본 모드는 **mode 3 방향 안내**다. 사용자가 실기기 시험으로 정한 운영값은 손바닥/목표 중심 **75px 이내, 8개 연속 유효 프레임**이다. 아래 실행 옵션으로 지정한다. 다섯 채널 duty 255로 350ms씩 두 번 울린다. mode 2 다중 주기도 유지한다. ESP가 이미 `caps=07`이면 이번 QA 변경으로 재업로드할 필요는 없다. 구형 수신기는 초기 STOP 이후 기능 확인에서 차단한다.
 
 - [현재 규격·획득 조건·업로드 및 실기기 시험](../../docs/2026-10-29_DH_도달알림_다섯손가락_BLE.md)
 
@@ -14,10 +14,13 @@ ESP의 `ble_final_receiver`용 송신부다. `KHS_KMJ_vision/detector.py`를 실
 `Raspi5_vision`에서 기존 가상환경을 활성화한 뒤 실행한다.
 
 ```bash
+cd "$HOME/Desktop/kimGA_raspi/microprocessor-capstone-design/03. 김가네 캡스톤 디자인/Raspi5_vision"
 source .venv/bin/activate
-python -m pip install -r ble_sender/requirements.txt
-python -u KHS_KMJ_vision/detector.py --mode 3
+export DISPLAY=:0
+python -u KHS_KMJ_vision/detector.py --address 9C:CC:01:82:75:8A --mode 3 --reach-px 75 --reach-frames 8
 ```
+
+코드 기본값은 여전히 50px/5프레임이며 명령 옵션이 우선한다. PuTTY에서 연결된 모니터로 창을 표시하는 실제 실행 기준은 위 명령이다. 처음 설치할 때 필요한 Python 의존성은 `python -m pip install -r ble_sender/requirements.txt`로 설치한다.
 
 실행 중 터미널 명령:
 
