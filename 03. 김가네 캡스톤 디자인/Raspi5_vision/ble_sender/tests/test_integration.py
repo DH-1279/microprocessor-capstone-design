@@ -430,7 +430,7 @@ class DetectorLoopTests(unittest.TestCase):
             run = replay([{"text": "캡스톤"}, {"text": "컵"}] + [{} for _ in range(10)], real_runtime=True)
         self.assertEqual(run.code, 0, run.log)
         self.assertEqual(len(run.states), 12)
-        self.assertTrue(any("진동 안내가 중단" in text for text in run.spoken))
+        self.assertTrue(any("장갑 연결이 끊겼습니다" in text for text in run.spoken))
         self.assertEqual(sum(cue is not None for cue in attempts), 1)
         self.assertIsNone(run.bridge.error)
         self.assertFalse(run.bridge.thread.is_alive())
@@ -438,7 +438,7 @@ class DetectorLoopTests(unittest.TestCase):
 
 class LifecycleTests(unittest.TestCase):
     def test_startup_budget_covers_scan_and_connection(self):
-        runtime = DetectorBLE(detector_arguments(["--no-console"]))
+        runtime = DetectorBLE(detector_arguments(["--manual-reconnect", "--no-console"]))
         runtime.ready = SimpleNamespace(wait=Mock(return_value=True))
         worker = SimpleNamespace(start=Mock(), join=Mock(), is_alive=Mock(side_effect=[True, False]))
         with (
@@ -466,7 +466,7 @@ class LifecycleTests(unittest.TestCase):
         async def failing(args, **kwargs):
             raise OSError("ESP missing")
 
-        runtime = DetectorBLE(detector_arguments(["--no-console"]))
+        runtime = DetectorBLE(detector_arguments(["--manual-reconnect", "--no-console"]))
         with patch("ble_sender.integration.run", failing):
             with self.assertRaisesRegex(RuntimeError, "ESP missing"):
                 runtime.start()

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import unicodedata
+import re
 
 CHO = tuple("ㄱㄲㄴㄷㄸㄹㅁㅂㅃㅅㅆㅇㅈㅉㅊㅋㅌㅍㅎ")
 JUNG = tuple("ㅏㅐㅑㅒㅓㅔㅕㅖㅗㅘㅙㅚㅛㅜㅝㅞㅟㅠㅡㅢㅣ")
@@ -30,6 +31,7 @@ CONTROLS = {
     "resume": ("계속", "계속해", "이어서"),
     "done":   ("찾았어", "찾았어요", "찾았다", "완료"),
     "repeat": ("다시", "다시말해줘", "다시안내", "뭐라고"),
+    "help": ("설명", "도움말", "사용법", "안내방법"),
 }
 DIRECTIONS = {"left": ("왼쪽", "왼편", "좌측"), "right": ("오른쪽", "오른편", "우측")}
 
@@ -65,6 +67,33 @@ STATE_COMMANDS = {
 # Stop outranks every other command, so no state may omit it.
 STATE_COMMANDS = {state: tuple(dict.fromkeys(commands + ("stop",)))
                   for state, commands in STATE_COMMANDS.items()}
+STATE_COMMANDS = {state: commands + ("help",) for state, commands in STATE_COMMANDS.items()}
+
+
+def normalize_transcript(text):
+    value = unicodedata.normalize("NFKC", text or "").casefold()
+    return " ".join(re.sub(r"[^\w\s]|_", " ", value).split())
+
+
+def match_wake(text, aliases, threshold=0.35):
+    value = normalize_transcript(text)
+    if any(word in value.replace(" ", "") for word in ("아니", "말고", "제외", "빼고")):
+        return False
+    tokens = value.split()
+    if any(t in NEGATIONS or t in CONTROLS["stop"] for t in tokens):
+        return False
+    tokens = [t for t in tokens if t not in ("헤이", "hey", "저기", "좀", "요")]
+    phrase = " ".join(tokens)
+    # Only observed/explicit variants, not unrestricted English fuzzy matching.
+    if phrase in ("kept stone", "keptstone", "capstone", "cap stone"):
+        return True
+    joined = "".join(tokens)
+    if not joined or len(joined) > 6 or not all("가" <= c <= "힣" for c in joined):
+        return False
+    candidates = [strip_particle(joined)]
+    if joined.endswith(("아", "야", "요")):
+        candidates.append(joined[:-1])
+    return any(word_distance(candidate, alias) <= threshold for candidate in candidates for alias in aliases)
 
 # Button identifiers reach the same parser as speech, so UI and voice share
 # one transition path instead of two.
@@ -137,11 +166,12 @@ def _alias_table(targets: dict) -> dict[str, tuple[str, ...]]:
     """Build label -> aliases from controller.targets, label itself included."""
     table: dict[str, tuple[str, ...]] = {}
     for label, item in targets.items():
-        aliases = tuple(str(a).strip() for a in item.get("aliases", ())
+        aliases = tuple(normalize_transcript(str(a)) for a in item.get("aliases", ())
                         if str(a).strip())
-        name = str(item.get("name", "")).strip()
+        name = normalize_transcript(str(item.get("name", "")))
         extra = (name,) if name else ()
-        table[label] = tuple(dict.fromkeys(aliases + extra + (label,)))
+        values = aliases + extra + (normalize_transcript(label),)
+        table[label] = tuple(dict.fromkeys(values + tuple(a.replace(" ", "") for a in values if " " in a)))
     return table
 
 
@@ -208,7 +238,12 @@ def _classify(word: str, aliases: dict, segment: bool = True):
 def parse(text: str, targets: dict, state: str = "any") -> Intent:
     """Parse one utterance. Refusals carry a reason the UI can explain."""
     raw = text or ""
-    cleaned = unicodedata.normalize("NFC", raw).strip().lower()
+    cleaned = normalize_transcript(raw)
+    # Known multiword labels are folded as whole phrases before grammar parsing.
+    aliases = _alias_table(targets)
+    phrases = sorted({a for values in aliases.values() for a in values if " " in a}, key=len, reverse=True)
+    for phrase in phrases:
+        cleaned = re.sub(r"(?<!\w)" + re.escape(phrase) + r"(?![a-z0-9_])", phrase.replace(" ", ""), cleaned)
     for mark in ".,!?;:":
         cleaned = cleaned.replace(mark, " ")
     words = cleaned.split()

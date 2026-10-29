@@ -23,14 +23,17 @@ def detector_arguments(argv=None):
         parser.error("포트는 1..65535")
     if any(not math.isfinite(value) or value <= 0 for value in (args.scan_timeout, args.connect_timeout)):
         parser.error("BLE 검색·연결 제한은 0보다 큰 유한한 초 값이어야 합니다.")
+    if not math.isfinite(args.retry_delay) or not 0 < args.retry_delay <= 10:
+        parser.error("자동 재연결 대기는 0초 초과, 10초 이하입니다.")
     return args
 
 
 class DetectorBLE:
     """Start once, publish current observations, close before audio teardown.
 
-    No BLE connection is silently replaced by dry run. A connection error
-    fails startup; --no-ble and --dry-run are explicit operator choices.
+    The default starts local IPC independently of ESP availability and retries
+    BLE in the background. Manual diagnostics retain the old blocking startup.
+    --no-ble and --dry-run remain explicit operator choices.
     """
 
     def __init__(self, args):
@@ -44,7 +47,8 @@ class DetectorBLE:
 
     def _worker(self):
         try:
-            asyncio.run(run(self.args, ready=self.ready, stop_requested=self.stop_requested, on_fault=self.notices.put))
+            asyncio.run(run(self.args, ready=self.ready, stop_requested=self.stop_requested,
+                            on_fault=self.notices.put, on_state=self.notices.put))
         except asyncio.CancelledError as error:
             if not self.stop_requested.is_set():
                 self.error = error
@@ -63,10 +67,10 @@ class DetectorBLE:
         self.thread.start()
         # Budget includes scanning, connection, initial I/O and cleanup. It
         # must not cancel a legitimate 30s connection after only 30s total.
-        startup_timeout = startup_budget(self.args.scan_timeout, self.args.connect_timeout)
+        startup_timeout = startup_budget(self.args.scan_timeout, self.args.connect_timeout) if self.args.manual_reconnect else 5
         if not self.ready.wait(startup_timeout):
             self.close()
-            raise TimeoutError("BLE 초기화 시간 초과: ESP 전원과 Bluetooth를 확인하세요.")
+            raise TimeoutError("BLE 작업 초기화 시간 초과: 로컬 송신 작업을 확인하세요.")
         if not self.check():
             raise RuntimeError("BLE 송신부가 초기화 중 종료되었습니다.")
         self.publisher = VisionPublisher(self.args.port)

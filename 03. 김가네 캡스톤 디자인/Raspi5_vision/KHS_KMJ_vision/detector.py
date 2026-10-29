@@ -24,6 +24,7 @@ from audio import AudioService
 import speech  # 문법 및 자모 편집 거리 기반 음성 파서
 from ble_sender.integration import DetectorBLE, detector_arguments
 from ble_sender.arrival import ArrivalGate, palm_center
+from KHS_KMJ_vision.dialogue import Announcements, HAPTIC_HELP, target_announcement
 
 # ==========================================
 # [긴급 패치 1] HailoRT physical.identify().device_architecture 우회
@@ -125,26 +126,7 @@ def format_prompt_target_speech(korean_list: list[str]) -> str:
     return f"찾을 물건을 말해주세요. {format_desk_items_speech(korean_list)}"
 
 def check_wake_word(text: str) -> bool:
-    if not text:
-        return False
-    cleaned = text.strip()
-    if "캡스톤" in cleaned:
-        return True
-    
-    words = cleaned.split()
-    for word in words:
-        bare = speech.strip_particle(word)
-        for wake in WAKE_WORDS:
-            if speech.word_distance(bare, wake) <= WAKE_THRESHOLD:
-                return True
-                
-    joined = "".join(words)
-    if len(joined) <= 6:
-        bare_joined = speech.strip_particle(joined)
-        for wake in WAKE_WORDS:
-            if speech.word_distance(bare_joined, wake) <= WAKE_THRESHOLD:
-                return True
-    return False
+    return speech.match_wake(text, WAKE_WORDS, WAKE_THRESHOLD)
 
 def draw_dashed_line(img, pt1, pt2, color=(30, 30, 30), thickness=2, dash_len=8, gap_len=6):
     dist = math.hypot(pt2[0] - pt1[0], pt2[1] - pt1[1])
@@ -205,11 +187,15 @@ def main(argv=None):
 
     command_queue = queue.Queue()
     audio_service = AudioService(audio_config, on_text=command_queue.put_nowait)
+    announcements = Announcements(audio_service)
     state = "WAIT_WAKE"
     target_eng_label = None
     lock_id = None
     frame_id = 0
-    pending_ble_notice = False
+    pending_ble_message = None
+    ble_state = "OFF" if arguments.no_ble else "WAITING"
+    first_haptic_help = True
+    last_ble_notice = {}
     pending_arrival_message = None
     arrival_gate = ArrivalGate(threshold=arguments.reach_px, frames=arguments.reach_frames, max_age=arguments.max_age)
     
@@ -234,7 +220,7 @@ def main(argv=None):
             pass
         audio_service.start()
         print("초기화 완료. 시동어 '캡스톤'을 기다리는 중...")
-        audio_service.say("시스템이 준비되었습니다. 캡스톤이라고 말씀해주세요.")
+        announcements.say("시스템이 준비되었습니다. 짧은 소리가 끝나면 말씀해주세요. 캡스톤이라고 말씀해주세요.")
         with CameraSource(config) as cam, \
              HailoDetector(config) as detector, \
              HandTracker(config) as tracker:
@@ -249,13 +235,29 @@ def main(argv=None):
                     print("BLE 터미널 종료 요청: 전체 프로그램을 종료합니다.")
                     break
                 notice = ble.pop_notice()
-                if notice:
-                    print(f"진동 안내 통신 중단: {notice}")
-                    pending_ble_notice = True
-                if pending_ble_notice and audio_service.say("진동 안내가 중단되었습니다. 연결 상태를 확인해주세요."):
-                    pending_ble_notice = False
-                if pending_arrival_message and audio_service.say(pending_arrival_message):
+                while notice is not None:
+                    if isinstance(notice, dict):
+                        ble_state = notice["state"]
+                        now_notice = time.monotonic()
+                        if now_notice - last_ble_notice.get(ble_state, -float("inf")) >= 10:
+                            pending_ble_message = notice["message"]
+                            last_ble_notice[ble_state] = now_notice
+                    else:
+                        print(f"진동 안내 통신 중단: {notice}")
+                        pending_ble_message = "진동 안내가 중단되었습니다. 연결 상태를 확인해주세요."
+                    notice = ble.pop_notice()
+                if pending_ble_message:
+                    announcements.say(pending_ble_message)
+                    pending_ble_message = None
+                if pending_arrival_message and announcements.say(pending_arrival_message):
                     pending_arrival_message = None
+                announcements.flush()
+                if hasattr(audio_service, "get_error"):
+                    audio_error = audio_service.get_error()
+                    if audio_error:
+                        print(f"오디오 오류: {audio_error}", flush=True)
+                if hasattr(audio_service, "set_context"):
+                    audio_service.set_context(state, tuple(item["name"] for item in TARGET_MAPPING.values()))
                 if state != "SEARCHING":
                     arrival_gate.reset()
                 read_result = cam.read()
@@ -276,6 +278,8 @@ def main(argv=None):
 
                 display_frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
                 height, width = display_frame.shape[:2]
+                put_readable_text(display_frame, f"Audio: {getattr(audio_service, 'input_state', 'UNKNOWN')} | BLE: {ble_state}",
+                                  (20, height - 45), font_scale=0.5)
 
                 current_detected_labels = {det.label for det in obj_detections} if obj_detections else set()
                 current_korean_list = [get_korean_name(l) for l in current_detected_labels]
@@ -284,6 +288,7 @@ def main(argv=None):
                 if not command_queue.empty():
                     command_text = command_queue.get_nowait()
                     print(f"\n🗣️ [음성 인식]: {command_text}")
+                    print(f"    [정규화]: {speech.normalize_transcript(command_text)}")
 
                 # (1) 시동어("캡스톤") 대기 상태
                 if state == "WAIT_WAKE":
@@ -292,12 +297,14 @@ def main(argv=None):
                         if idle_intent.kind == "control" and idle_intent.name == "stop":
                             ble.stop()
                             pending_arrival_message = None
+                        elif idle_intent.kind == "control" and idle_intent.name == "help":
+                            announcements.say(HAPTIC_HELP)
                     if command_text and check_wake_word(command_text):
                         pending_arrival_message = None
                         print("👉 시동어 '캡스톤' 감지됨!")
                         state = "WAIT_TARGET"
                         # (2) 시동어 감지 시 안내 멘트 + 현재 인식된 물건 안내
-                        audio_service.say(format_prompt_target_speech(current_korean_list))
+                        announcements.say(format_prompt_target_speech(current_korean_list))
 
                 # (2) 찾을 물건 입력 대기 상태
                 elif state == "WAIT_TARGET":
@@ -323,26 +330,29 @@ def main(argv=None):
                                 no_hand_since = time.monotonic()  # 탐색 진입 시 손 미인식 타이머 시작
 
                                 print(f"🎯 타겟 설정 완료: {target_kor} (매칭 별칭: {intent.detail})")
-                                audio_service.say(f"{target_kor}을(를) 찾아 안내합니다.")
+                                announcements.say(target_announcement(target_kor, first_haptic_help))
+                                first_haptic_help = False
                             else:
                                 target_kor = get_korean_name(matched)
                                 print(f"⚠️ 화면에 '{target_kor}' 없음 (현재 감지됨: {current_korean_list})")
-                                audio_service.say(f"현재 화면에 {target_kor}이 없습니다. 다시 말씀해 주세요.")
+                                announcements.say(f"현재 화면에 {target_kor}이 없습니다. 다시 말씀해 주세요.")
 
                         elif intent.kind == "control":
                             # (3) "리스트" 명령 시 현재 책상 위 물건 안내
                             if intent.name == "list":
-                                audio_service.say(format_desk_items_speech(current_korean_list))
+                                announcements.say(format_desk_items_speech(current_korean_list))
+                            elif intent.name == "help":
+                                announcements.say(HAPTIC_HELP)
                             elif intent.name == "stop":
                                 ble.stop()
                                 pending_arrival_message = None
                                 print("⏹️ 대기 상태로 복귀합니다.")
                                 state = "WAIT_WAKE"
-                                audio_service.say("취소되었습니다. 다시 부르시려면 캡스톤이라고 말씀해주세요.")
+                                announcements.say("취소되었습니다. 다시 부르시려면 캡스톤이라고 말씀해주세요.")
                         else:
                             refusal_msg = speech.refusal_speech(intent)
                             if refusal_msg:
-                                audio_service.say(refusal_msg)
+                                announcements.say(refusal_msg)
 
                 # (4) 목표 물건 추적 상태
                 elif state == "SEARCHING":
@@ -359,13 +369,15 @@ def main(argv=None):
                                 locked_center = None
                                 missing_frame_count = 0
                                 no_hand_since = None
-                                audio_service.say("안내를 중지합니다. 다시 부르시려면 캡스톤이라고 말씀해주세요.")
+                                announcements.say("안내를 중지합니다. 다시 부르시려면 캡스톤이라고 말씀해주세요.")
                                 continue
                             # (3) 추적 중에도 "리스트"를 외치면 동일하게 안내
                             elif intent.name == "list":
-                                audio_service.say(format_desk_items_speech(current_korean_list))
+                                announcements.say(format_desk_items_speech(current_korean_list))
                             elif intent.name == "repeat" and target_eng_label:
-                                audio_service.say(f"현재 {get_korean_name(target_eng_label)}을 찾고 있습니다.")
+                                announcements.say(f"현재 {get_korean_name(target_eng_label)}을 찾고 있습니다.")
+                            elif intent.name == "help":
+                                announcements.say(HAPTIC_HELP)
 
                     candidates = [det for det in obj_detections if det.label == target_eng_label] if obj_detections else []
                     found_target = None
@@ -394,7 +406,7 @@ def main(argv=None):
                         if no_hand_since is None:
                             no_hand_since = now_mono
                         elif now_mono - no_hand_since >= HAND_MISSING_ALERT_INTERVAL:
-                            if audio_service.say("손이 인식되지 않습니다."):
+                            if announcements.say("손이 인식되지 않습니다."):
                                 no_hand_since = now_mono
 
                     if found_target:
@@ -432,7 +444,7 @@ def main(argv=None):
                         if locked_seen_at is None:
                             ble.stop()
                             print(f"⚠️ {target_kor}을(를) 장시간 찾을 수 없어 타겟을 해제합니다.")
-                            audio_service.say("물건을 찾을 수 없습니다. 다시 말씀해 주세요.")
+                            announcements.say("물건을 찾을 수 없습니다. 다시 말씀해 주세요.")
                             state = "WAIT_TARGET"
                             target_eng_label = None
                             locked_target_box = None

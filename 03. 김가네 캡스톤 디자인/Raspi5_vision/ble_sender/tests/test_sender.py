@@ -411,7 +411,7 @@ class AsyncTests(unittest.IsolatedAsyncioTestCase):
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
             probe.bind(("127.0.0.1", 0))
             port = probe.getsockname()[1]
-        args = detector_arguments(["--port", str(port), "--stable-frames", "1"])
+        args = detector_arguments(["--manual-reconnect", "--port", str(port), "--stable-frames", "1"])
         with (
             patch("ble_sender.cli.Link", RecoveringLink),
             patch("ble_sender.cli.start_console", console),

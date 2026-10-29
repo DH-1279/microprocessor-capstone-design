@@ -32,13 +32,18 @@ class Link:
         from bleak import BleakClient, BleakScanner
 
         print(f"BLE 검색 중 | 제한={self.scan_timeout:g}초", flush=True)
-        if self.address:
-            device = await BleakScanner.find_device_by_address(self.address, timeout=self.scan_timeout)
-        else:
-            device = await BleakScanner.find_device_by_filter(
-                lambda d, a: (a.local_name or d.name) == NAME and SERVICE in (a.service_uuids or []),
-                timeout=self.scan_timeout,
-            )
+        try:
+            if self.address:
+                device = await BleakScanner.find_device_by_address(self.address, timeout=self.scan_timeout)
+            else:
+                device = await BleakScanner.find_device_by_filter(
+                    lambda d, a: (a.local_name or d.name) == NAME and SERVICE in (a.service_uuids or []),
+                    timeout=self.scan_timeout,
+                )
+        except (ValueError, ImportError):
+            raise
+        except Exception as error:
+            raise ConnectionError(f"BLE 검색 실패: {type(error).__name__}: {error}") from error
         if device is None:
             raise RuntimeError(f"{NAME}를 찾지 못했습니다. BLE v2 수신기를 확인하세요.")
         print(f"BLE 장치 발견 | {getattr(device, 'address', self.address) or NAME}", flush=True)
@@ -81,6 +86,8 @@ class Link:
                 raise RuntimeError(
                     f"BLE {stage} 시간 초과 (주소={getattr(device, 'address', self.address) or NAME}). " + hint
                 ) from error
+            if isinstance(error, Exception) and not isinstance(error, (RuntimeError, ValueError, ImportError)):
+                raise ConnectionError(f"BLE {stage} 실패: {type(error).__name__}: {error}") from error
             raise
 
     async def send(self, cue):

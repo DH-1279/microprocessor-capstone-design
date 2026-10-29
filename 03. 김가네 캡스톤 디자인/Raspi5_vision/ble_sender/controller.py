@@ -47,6 +47,7 @@ class Controller:
         self.mode = Mode(mode)
         self.allow_test = allow_test
         self.paused = False
+        self.link_ready = True
         self.session = None
         self.last_sequence = -1
         self.last_frame = -1
@@ -70,6 +71,12 @@ class Controller:
         self.target_id = None
         self.test_cue = None
         self.reason = reason
+
+    def set_link_ready(self, connected):
+        """Link recovery never overrides an operator's explicit stop."""
+        self.link_ready = connected
+        self.floor = self.clock()
+        self.clear("BLE 연결: 새 프레임 대기" if connected else "장갑 연결 대기")
 
     def receive(self, data, now=None):
         now = self.clock() if now is None else now
@@ -126,6 +133,11 @@ class Controller:
             if (type(seen) not in (int, float) or not math.isfinite(seen)
                     or not 0 <= captured - seen or not 0 <= now - seen):
                 raise ValueError("invalid locked target timestamp")
+            if not self.link_ready:
+                if packet.get("event") == "arrival" and target_id not in self.completed:
+                    self.completed.append(target_id)  # Never replay an offline completion.
+                self.guidance = self.arrival_cue = self.test_cue = None
+                return True
             if self.paused:
                 return True
             if target_id != self.target_id:
@@ -170,7 +182,7 @@ class Controller:
 
     def cue(self, now=None):
         now = self.clock() if now is None else now
-        if self.paused:
+        if self.paused or not self.link_ready:
             return None
         if self.arrival_cue is not None:
             if now < self.arrival_until:
@@ -220,6 +232,8 @@ class Controller:
             )
             return f"mode={self.mode.value} paused={self.paused} | {text} | {self.reason}", False, False
         if words[0] == "test":
+            if not self.link_ready:
+                return "장갑 연결 전에는 모터 시험을 실행하지 않습니다.", False, False
             if not self.allow_test:
                 return "독립 모터 시험은 --allow-test로 실행해야 합니다.", False, False
             try:

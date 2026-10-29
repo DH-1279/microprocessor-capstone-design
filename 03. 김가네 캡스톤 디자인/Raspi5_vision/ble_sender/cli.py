@@ -79,10 +79,11 @@ def start_console(loop, commands, changed):
     return lambda: None
 
 
-async def transmit(controller, link, commands, changed, finished, *, interval=0.1, reply=print):
+async def transmit(controller, link, commands, changed, finished, *, interval=0.1, reply=print, health_interval=None):
     """Only this coroutine writes BLE; callbacks update desired state only."""
     # Link.__aenter__ already confirmed STOP before this loop starts.
     last_cue, last_write = None, -float("inf")
+    last_health = monotonic()
     while not finished.is_set():
         changed.clear()
         while not commands.empty():
@@ -117,6 +118,10 @@ async def transmit(controller, link, commands, changed, finished, *, interval=0.
                 )
                 reply(f"송신: {text} | {controller.reason}")
             last_cue, last_write = cue, now
+        if (health_interval is not None and cue is None and hasattr(link, "status")
+                and monotonic() - last_health >= health_interval):
+            await asyncio.wait_for(link.status(), 1)
+            last_health = monotonic()
         wait_for = interval if cue is None else max(0.001, interval - (monotonic() - last_write))
         try:
             await asyncio.wait_for(changed.wait(), wait_for)
@@ -152,7 +157,15 @@ async def wait_reconnect(controller, commands, changed, finished, detail, *, rep
     return False
 
 
-async def run(args, *, ready=None, stop_requested=None, on_fault=None):
+async def run(args, *, ready=None, stop_requested=None, on_fault=None, on_state=None):
+    if not args.manual_reconnect:
+        from .auto_link import run_auto
+        return await run_auto(args, ready=ready, stop_requested=stop_requested,
+                              on_fault=on_fault, on_state=on_state)
+    return await run_manual(args, ready=ready, stop_requested=stop_requested, on_fault=on_fault)
+
+
+async def run_manual(args, *, ready=None, stop_requested=None, on_fault=None):
     loop = asyncio.get_running_loop()
     changed, finished = asyncio.Event(), asyncio.Event()
     controller = Controller(
@@ -258,6 +271,8 @@ def parser():
     p.add_argument("--dry-run", action="store_true", help="BLE 없이 매핑/패킷만 검사")
     p.add_argument("--allow-test", action="store_true", help="최대 2초 독립 모터 시험 허용")
     p.add_argument("--no-console", action="store_true", help="키보드 입력 없이 실행")
+    p.add_argument("--manual-reconnect", action="store_true", help="점검용: 연결 실패 시 수동 reconnect/resume")
+    p.add_argument("--retry-delay", type=float, default=2.0, help="자동 재연결 초기 대기(초), 최대 10초로 증가")
     p.add_argument("--rate-channel", choices=tuple(Channel.__members__), default="IN")
     p.add_argument("--single-rate", action="store_true", help="mode 2를 지정한 한 손가락으로만 시험 (기본은 다섯 채널)")
     p.add_argument(
