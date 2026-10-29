@@ -1,11 +1,17 @@
 {
   "controller": {
     "targets": {
-      "cup": {"name": "컵", "aliases": ["컵", "머그", "cup"]},
-      "bottle": {"name": "물병", "aliases": ["물병", "생수", "보틀", "bottle"]},
-      "cell phone": {"name": "휴대전화", "aliases": ["휴대폰", "휴대전화", "스마트폰", "핸드폰", "phone"]},
-      "book": {"name": "책", "aliases": ["책", "book"]},
-      "mouse": {"name": "마우스", "aliases": ["마우스", "mouse"]}
+      "Earbud": {"name": "이어폰", "aliases": ["무선 이어폰", "이어버드", "이어폰"]},
+      "bottle": {"name": "물병", "aliases": ["병", "페트병", "물병"]},
+      "cell phone": {"name": "휴대폰", "aliases": ["스마트폰", "핸드폰", "휴대폰"]},
+      "cup": {"name": "컵", "aliases": ["머그컵", "종이컵", "컵"]},
+      "remote": {"name": "리모컨", "aliases": ["리모컨", "리모콘", "리모칸"]},
+      "Glasses": {"name": "안경", "aliases": ["돋보기안경", "돋보기", "안경"]},
+      "Medicine": {"name": "약통", "aliases": ["약", "알약", "약통"]},
+      "key": {"name": "열쇠", "aliases": ["차키", "키", "열쇠"]},
+      "Pen": {"name": "볼펜", "aliases": ["펜", "연필", "볼펜"]},
+      "Tumbler": {"name": "텀블러", "aliases": ["보온병", "물통", "텀블러"]},
+      "Wallet": {"name": "지갑", "aliases": ["카드지갑", "동전지갑", "지갑"]}
     },
     "announce_interval_s": 5.0,
     "max_frame_age_s": 0.5,
@@ -33,7 +39,8 @@
     "object_model": "models/yolov8n_hailo10h.hef",
     "labels_file": "models/coco.txt",
     "hand_model": "models/hand_landmarker.task",
-    "hand": "Right",
+    "hand": "Any",
+    "worn_hand": "Left",
     "score_threshold": 0.5,
     "hand_score_threshold": 0.6,
     "max_objects": 20,
