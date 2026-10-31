@@ -144,7 +144,7 @@ def main(argv=None):
     config = {
         "object_model": HEF_PATH,
         "labels_file": LABELS_PATH,
-        "score_threshold": 0.2,
+        "score_threshold": 0.1,
         "max_objects": 20,
         "infer_timeout_ms": 1500,
         
