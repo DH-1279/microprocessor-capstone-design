@@ -247,6 +247,9 @@ def main(argv=None):
                 frame_id += 1
                 
                 obj_detections = detector.detect(frame)
+                EXCLUDED_LABELS = "cell phone"
+                if obj_detections:
+                    obj_detections = tuple(det for det in obj_detections if det.label != EXCLUDED_LABELS)
                 hand_result = tracker.detect(frame, timestamp)
                 frame_fresh = 0 <= time.monotonic() - timestamp <= arguments.max_age
                 landmarks = (tracker.last_observed_landmarks
