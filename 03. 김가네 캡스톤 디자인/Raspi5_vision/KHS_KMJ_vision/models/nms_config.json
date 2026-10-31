@@ -6,7 +6,7 @@
     640
   ],
   "max_proposals_per_class": 100,
-  "classes": 11,
+  "classes": 10,
   "regression_length": 16,
   "background_removal": false,
   "background_removal_index": 0,

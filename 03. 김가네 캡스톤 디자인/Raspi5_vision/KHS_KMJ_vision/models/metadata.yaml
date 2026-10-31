@@ -1,6 +1,6 @@
 description: Ultralytics best model trained on /content/dataset/Merged_Dataset/data.yaml
 author: Ultralytics
-date: '2026-10-17T00:22:20.229835+09:00'
+date: '2026-10-30T18:41:25.362713+09:00'
 version: 8.4.177
 license: AGPL-3.0 License (https://ultralytics.com/license)
 docs: https://docs.ultralytics.com
@@ -12,17 +12,16 @@ imgsz:
 - 640
 - 640
 names:
-  0: Earbud
-  1: bottle
-  2: cell phone
-  3: cup
-  4: remote
-  5: Glasses
-  6: Medicine
-  7: key
-  8: Pen
-  9: Tumbler
-  10: Wallet
+  0: bottle
+  1: cup
+  2: mouse
+  3: remote
+  4: Glasses
+  5: Pen
+  6: cell phone
+  7: Sunglasses
+  8: Tumbler
+  9: Wallet
 args:
   data: data.yaml
   name: hailo10h
