@@ -154,11 +154,11 @@ class BridgeProbe:
         self.closed = True
 
 
-def replay(rows, *, real_runtime=False, fail_audio=False, mode=3):
+def replay(rows, *, real_runtime=False, fail_audio=False, mode=3, list_hits=1):
     module = load_detector()
     position = [-1]
     clock = [0.0]
-    spoken, states = [], []
+    spoken, states, overlays = [], [], []
     state = SimpleNamespace(bridge=None, audio_closed=False, tone_changes=[])
     volume = Mock(return_value=SimpleNamespace(returncode=0))
 
@@ -204,7 +204,7 @@ def replay(rows, *, real_runtime=False, fail_audio=False, mode=3):
                 time.sleep(0.04)
                 clock[0] = time.monotonic()
             else:
-                clock[0] = 1.0 + position[0] / 15
+                clock[0] = row.get("at", 1.0 + position[0] / 15)
             if row.get("text"):
                 state.audio.on_text(row["text"])
             return Frame(), clock[0] - row.get("age", 0)
@@ -227,10 +227,13 @@ def replay(rows, *, real_runtime=False, fail_audio=False, mode=3):
         return state.bridge
 
     def overlay(frame, text, *args, **kw):
+        overlays.append(text)
         if text.startswith("State: "):
             states.append(text.split(" | ")[0][7:])
 
-    argv = ["--no-console", "--stable-frames", "1", "--mode", str(mode)]
+    # Legacy loop tests start with synthetic commands immediately. New list
+    # tests pass list_hits=3 to exercise production confirmation separately.
+    argv = ["--no-console", "--stable-frames", "1", "--mode", str(mode), "--list-hits", str(list_hits)]
     if real_runtime:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
             probe.bind(("127.0.0.1", 0))
@@ -254,6 +257,7 @@ def replay(rows, *, real_runtime=False, fail_audio=False, mode=3):
         bridge=state.bridge,
         spoken=spoken,
         states=states,
+        overlays=overlays,
         audio_closed=state.audio_closed,
         tone_changes=state.tone_changes,
         code=exit_code,

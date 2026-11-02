@@ -16,9 +16,16 @@ def detector_arguments(argv=None):
     parser.add_argument("--no-ble", action="store_true", help="ESP 없이 영상·음성만 실행")
     parser.add_argument("--reach-px", type=float, default=50.0, help="손바닥/목표 중심 획득 거리(px), 기본 50")
     parser.add_argument("--reach-frames", type=int, default=5, help="획득에 필요한 연속 유효 프레임, 기본 5")
+    parser.add_argument("--list-hold", type=float, default=3.0, help="대기 중 물건 목록 유지 시간(초), 기본 3")
+    parser.add_argument("--list-window", type=int, default=5, help="목록 확인 프레임 창, 기본 5")
+    parser.add_argument("--list-hits", type=int, default=3, help="창 안에서 목록 등록에 필요한 탐지 횟수, 기본 3")
+    parser.add_argument("--selection-wait", type=float, default=2.0, help="목표 선택 시 새 위치 관측 대기(초), 기본 2")
     args = parser.parse_args(argv)
     if not math.isfinite(args.reach_px) or args.reach_px <= 0 or args.reach_frames < 1:
         parser.error("획득 거리와 프레임 수는 0보다 커야 합니다.")
+    if (not 1 <= args.list_hits <= args.list_window <= 30
+            or any(not math.isfinite(v) or not 0 < v <= 30 for v in (args.list_hold, args.selection_wait))):
+        parser.error("목록은 1 <= hits <= window <= 30, 유지·선택 대기는 0초 초과 30초 이하입니다.")
     if not 1 <= args.port <= 65535:
         parser.error("포트는 1..65535")
     if any(not math.isfinite(value) or value <= 0 for value in (args.scan_timeout, args.connect_timeout)):

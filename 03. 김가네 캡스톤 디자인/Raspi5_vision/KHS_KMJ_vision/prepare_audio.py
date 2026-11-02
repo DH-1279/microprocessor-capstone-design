@@ -17,6 +17,8 @@ def prompt_catalog():
     """Finite prompts only: arbitrary combinations of detected items stay dynamic."""
     texts = [STARTUP_HELP, HAPTIC_HELP, SHORT_HAPTIC_HELP,
              "손이 인식되지 않습니다.",
+             "물체 위치를 다시 확인하고 있습니다.",
+             "물체 위치를 확인하지 못했습니다. 다시 말씀해주세요.",
              "물건을 찾을 수 없습니다. 다시 말씀해 주세요.",
              "취소되었습니다. 다시 부르시려면 캡스톤이라고 말씀해주세요.",
              "안내를 중지합니다. 다시 부르시려면 캡스톤이라고 말씀해주세요.",

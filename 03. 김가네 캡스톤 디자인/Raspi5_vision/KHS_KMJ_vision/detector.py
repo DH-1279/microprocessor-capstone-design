@@ -26,6 +26,7 @@ from ble_sender.integration import DetectorBLE, detector_arguments
 from ble_sender.arrival import ArrivalGate, palm_center
 from KHS_KMJ_vision.dialogue import Announcements, HAPTIC_HELP, STARTUP_HELP, target_announcement_parts
 from KHS_KMJ_vision.voice_profile import TARGET_MAPPING, detector_audio_config
+from KHS_KMJ_vision.inventory import ObjectInventory
 
 # ==========================================
 # [긴급 패치 1] HailoRT physical.identify().device_architecture 우회
@@ -173,6 +174,10 @@ def main(argv=None):
     first_haptic_help = True
     pending_arrival_message = None
     arrival_gate = ArrivalGate(threshold=arguments.reach_px, frames=arguments.reach_frames, max_age=arguments.max_age)
+    inventory = ObjectInventory(window=arguments.list_window, hits=arguments.list_hits,
+                                hold_s=arguments.list_hold, max_age=arguments.max_age)
+    pending_target = None
+    selection_deadline = None
     
     locked_target_box = None     
     locked_center = None         
@@ -250,6 +255,9 @@ def main(argv=None):
                     obj_detections = tuple(det for det in obj_detections if det.label != EXCLUDED_LABELS)
                 hand_result = tracker.detect(frame, timestamp)
                 frame_fresh = 0 <= time.monotonic() - timestamp <= arguments.max_age
+                inventory_now = time.monotonic()
+                listed_objects = inventory.update(obj_detections, timestamp, inventory_now)
+                listed_labels = tuple(item.detection.label for item in listed_objects)
                 landmarks = (tracker.last_observed_landmarks
                              if hand_result is not None and frame_fresh else None)
                 found_target = None
@@ -260,7 +268,9 @@ def main(argv=None):
                                   (20, height - 45), font_scale=0.5)
 
                 current_detected_labels = {det.label for det in obj_detections} if obj_detections else set()
-                current_korean_list = [get_korean_name(l) for l in current_detected_labels]
+                list_labels = (tuple(sorted(current_detected_labels)) if state == "SEARCHING" else listed_labels)
+                # Snapshot one immutable sentence for TTS; later frames cannot rewrite it.
+                current_korean_list = [get_korean_name(l) for l in list_labels]
 
                 command_text = None
                 if not command_queue.empty():
@@ -281,6 +291,8 @@ def main(argv=None):
                         pending_arrival_message = None
                         print("👉 시동어 '캡스톤' 감지됨!")
                         state = "WAIT_TARGET"
+                        pending_target = None
+                        selection_deadline = None
                         # (2) 시동어 감지 시 안내 멘트 + 현재 인식된 물건 안내
                         announcements.say(format_prompt_target_speech(current_korean_list))
 
@@ -292,24 +304,13 @@ def main(argv=None):
 
                         if intent.kind == "target" and intent.name:
                             matched = intent.name
-                            if matched in current_detected_labels:
-                                target_eng_label = matched
-                                lock_id = uuid.uuid4().hex
-                                state = "SEARCHING"
-                                target_kor = get_korean_name(matched)
-                                
-                                found_target = next((det for det in obj_detections if det.label == target_eng_label), None)
-                                if found_target:
-                                    locked_target_box = found_target.box
-                                    locked_seen_at = timestamp
-                                    x1, y1, x2, y2 = locked_target_box
-                                    locked_center = (int(((x1 + x2) / 2) * width), int(((y1 + y2) / 2) * height))
-                                missing_frame_count = 0
-                                no_hand_since = time.monotonic()  # 탐색 진입 시 손 미인식 타이머 시작
-
-                                print(f"🎯 타겟 설정 완료: {target_kor} (매칭 별칭: {intent.detail})")
-                                announcements.say_parts(target_announcement_parts(target_kor, first_haptic_help))
-                                first_haptic_help = False
+                            pending_target = None
+                            selection_deadline = None
+                            if matched in listed_labels or (frame_fresh and matched in current_detected_labels):
+                                pending_target = matched
+                                selection_deadline = time.monotonic() + arguments.selection_wait
+                                if not frame_fresh or matched not in current_detected_labels:
+                                    announcements.say("물체 위치를 다시 확인하고 있습니다.")
                             else:
                                 target_kor = get_korean_name(matched)
                                 print(f"⚠️ 화면에 '{target_kor}' 없음 (현재 감지됨: {current_korean_list})")
@@ -323,6 +324,8 @@ def main(argv=None):
                                 announcements.say(HAPTIC_HELP)
                             elif intent.name == "stop":
                                 ble.stop()
+                                pending_target = None
+                                selection_deadline = None
                                 pending_arrival_message = None
                                 print("⏹️ 대기 상태로 복귀합니다.")
                                 state = "WAIT_WAKE"
@@ -331,6 +334,35 @@ def main(argv=None):
                             refusal_msg = speech.refusal_speech(intent)
                             if refusal_msg:
                                 announcements.say(refusal_msg)
+
+                    if state == "WAIT_TARGET" and pending_target is not None:
+                        # Inventory is for speech/display only. Never turn its held
+                        # box into a newly observed control target.
+                        observed = next((det for det in (obj_detections or ())
+                                         if det.label == pending_target), None)
+                        selection_now = time.monotonic()
+                        if (selection_now <= selection_deadline and frame_fresh
+                                and observed is not None and pending_target in listed_labels):
+                            target_eng_label = pending_target
+                            pending_target = None
+                            selection_deadline = None
+                            lock_id = uuid.uuid4().hex
+                            state = "SEARCHING"
+                            target_kor = get_korean_name(target_eng_label)
+                            found_target = observed
+                            locked_target_box = observed.box
+                            locked_seen_at = timestamp
+                            x1, y1, x2, y2 = locked_target_box
+                            locked_center = (int(((x1 + x2) / 2) * width), int(((y1 + y2) / 2) * height))
+                            missing_frame_count = 0
+                            no_hand_since = time.monotonic()
+                            print(f"🎯 타겟 설정 완료: {target_kor} (현재 프레임 위치 확인)")
+                            announcements.say_parts(target_announcement_parts(target_kor, first_haptic_help))
+                            first_haptic_help = False
+                        elif selection_now >= selection_deadline:
+                            pending_target = None
+                            selection_deadline = None
+                            announcements.say("물체 위치를 확인하지 못했습니다. 다시 말씀해주세요.")
 
                 # (4) 목표 물건 추적 상태
                 elif state == "SEARCHING":
@@ -518,10 +550,25 @@ def main(argv=None):
                     put_readable_text(display_frame, f"[LOCKED] {target_eng_label}", (pt1[0], max(pt1[1] - 8, 15)), 
                                       text_color=(0, 100, 255), outline_color=(255, 255, 255), font_scale=0.55, thickness=2)
 
+                if state in {"WAIT_WAKE", "WAIT_TARGET"}:
+                    for item in listed_objects:
+                        det = item.detection
+                        if frame_fresh and det.label in current_detected_labels:
+                            continue
+                        x1, y1, x2, y2 = det.box
+                        corners = ((int(x1 * width), int(y1 * height)),
+                                   (int(x2 * width), int(y1 * height)),
+                                   (int(x2 * width), int(y2 * height)),
+                                   (int(x1 * width), int(y2 * height)))
+                        for start, end in zip(corners, corners[1:] + corners[:1]):
+                            draw_dashed_line(display_frame, start, end, color=(160, 160, 160))
+                        put_readable_text(display_frame, f"[LIST HOLD] {det.label} {inventory_now - item.seen_at:.1f}s",
+                                          (corners[0][0], max(corners[0][1] - 8, 15)), font_scale=0.5)
+
                 if hand_result is not None:
                     draw_hand(cv2, display_frame, tracker, hand_result)
 
-                list_str = ", ".join(current_detected_labels) if current_detected_labels else "None"
+                list_str = ", ".join(list_labels) if list_labels else "None"
                 status_msg = f"State: {state} | Detected: [{list_str}]"
                 put_readable_text(display_frame, status_msg, (10, 30), font_scale=0.65, 
                                   text_color=(255, 255, 255), outline_color=(0, 0, 0), thickness=2)
