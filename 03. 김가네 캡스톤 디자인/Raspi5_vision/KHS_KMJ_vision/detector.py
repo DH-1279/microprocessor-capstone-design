@@ -189,9 +189,10 @@ def main(argv=None):
         ble.start()
         # 기존 볼륨 설정을 유지하되 믹서 응답 때문에 초기화가 멈추지 않게 한다.
         try:
-            subprocess.run(["amixer", "-c", "3", "set", "PCM", "100%"],
+            speaker_card = audio_config["output_mixer_card"]
+            subprocess.run(["amixer", "-c", speaker_card, "set", "PCM", "100%"],
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2)
-            subprocess.run(["amixer", "set", "Master", "100%"],
+            subprocess.run(["amixer", "-c", speaker_card, "set", "Master", "100%"],
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2)
         except Exception:
             pass

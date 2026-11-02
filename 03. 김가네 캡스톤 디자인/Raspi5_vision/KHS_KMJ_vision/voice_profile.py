@@ -19,6 +19,7 @@ TARGET_MAPPING = {
 
 
 def detector_audio_config(project_root):
+    speaker_card = "UACDemoV10"
     return {
         "enabled": True,
         "whisper_executable": "/home/dh1279/Desktop/kimGA_raspi/whisper.cpp/build/bin/whisper-cli",
@@ -29,7 +30,8 @@ def detector_audio_config(project_root):
         "cache_dir": "~/.cache/kimgane-haptic/tts",
         "ready_tone_ms": 250,
         "ready_tone_amplitude": 6000,
-        "output_device": "plughw:3,0",
+        "output_device": f"plughw:CARD={speaker_card},DEV=0",
+        "output_mixer_card": speaker_card,
         "input_backend": "alsa",
         "input_alsa_device": "plughw:CARD=GM20U,DEV=0",
         "capture_executable": "/usr/bin/arecord",

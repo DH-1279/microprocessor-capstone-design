@@ -350,7 +350,8 @@ class DetectorLoopTests(unittest.TestCase):
         self.assertIn(("property", "Capstone Vision Controller", 0, 1), run.window_requests)
         self.assertEqual(
             [call.args[0] for call in run.volume_calls],
-            [["amixer", "-c", "3", "set", "PCM", "100%"], ["amixer", "set", "Master", "100%"]],
+            [["amixer", "-c", "UACDemoV10", "set", "PCM", "100%"],
+             ["amixer", "-c", "UACDemoV10", "set", "Master", "100%"]],
         )
         self.assertTrue(all(call.kwargs["timeout"] == 2 for call in run.volume_calls))
 

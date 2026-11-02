@@ -36,6 +36,8 @@ arecord -l
 # card N: GM20U [...]가 보이는지 확인한다. N이 달라져도 CARD=GM20U로 연다.
 ```
 
-`voice_profile.py`의 `input_alsa_device`가 실제 카드 ID와 일치해야 한다. 다른 녹음 프로그램이 장치를 점유하면 기다리며 재시도한다. 이 자동 복구는 `input_backend="alsa"`인 통합 실행기 설정에 적용된다. 기존 `sounddevice` 경로도 유지하지만 USB 자동 복구용 경로는 아니다. 재생 장치 설정 `output_device`는 이번 수정에서 바꾸지 않았다.
+`voice_profile.py`의 `input_alsa_device`가 실제 카드 ID와 일치해야 한다. 다른 녹음 프로그램이 장치를 점유하면 기다리며 재시도한다. 이 자동 복구는 `input_backend="alsa"`인 통합 실행기 설정에 적용된다. 기존 `sounddevice` 경로도 유지하지만 USB 자동 복구용 경로는 아니다.
+
+스피커 재생·볼륨 설정은 `UACDemoV10`, 마이크 입력은 `GM20U`로 분리한다. 사용자 `aplay -l`에서 카드 2가 스피커 UACDemoV10이고 카드 3은 GM20U의 재생 단자임을 확인했다. 기존 `plughw:3,0` 출력을 `plughw:CARD=UACDemoV10,DEV=0`으로 고쳐 USB 재인식에 따른 카드 번호 변화에도 같은 스피커를 선택한다. 다른 스피커를 쓸 때는 `voice_profile.py`의 `speaker_card`를 변경한다.
 
 시작 안내 문구는 준비음 유무에 의존하지 않도록 줄였다. 실제 GM20U 스위치 OFF/ON과 장갑 연결 시험은 별도로 확인해야 한다.
