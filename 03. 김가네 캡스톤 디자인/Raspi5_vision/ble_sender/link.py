@@ -5,7 +5,7 @@ import logging
 import math
 from time import monotonic
 
-from .protocol import COMMAND, NAME, SERVICE, STATUS, Status, encode
+from .protocol import COMMAND, NAME, SERVICE, STATUS, Channel, Cue, Mode, Status, Zone, encode
 
 logger = logging.getLogger(__name__)
 CONNECT_GRACE = 2
@@ -27,6 +27,7 @@ class Link:
         self.last_operation = "초기화"
         self.last_ack_s = None
         self.last_slow_notice = -math.inf
+        self.initial_status = None
 
     async def __aenter__(self):
         from bleak import BleakClient, BleakScanner
@@ -65,6 +66,7 @@ class Link:
             status = await self.status(timeout=STARTUP_IO_TIMEOUT)
             if status.capabilities != 7:
                 raise RuntimeError(f"ESP 펌웨어 업데이트 필요: capability={status.capabilities:#04x}, 필요=0x07. ble_final_receiver를 다시 업로드하세요 (350ms 획득 알림/반복 근접 안내).")
+            self.initial_status = status
             print(
                 "BLE 연결 | " + ("ESP DRY_RUN: 실제 모터 출력 없음" if status.flags & 16 else "실제 모터 출력 가능"),
                 flush=True,
@@ -93,10 +95,29 @@ class Link:
     async def send(self, cue):
         await self._write(cue, WRITE_ACK_TIMEOUT)
 
-    async def _write(self, cue, timeout):
+    async def connection_feedback(self):
+        """One 200ms all-finger pulse, after checks and before any vision cue.
+
+        Existing multi-rate FAR renders 200ms ON then 1000ms OFF. A 300ms
+        TTL prevents a second pulse even if the acknowledgement or STOP stalls.
+        check_link never calls this: its STOP-only inspection stays unchanged.
+        """
+        if self.initial_status is None or self.initial_status.flags & 16:
+            return False
+        cue = Cue(Mode.RATE, Zone.FAR, Channel.IN, (180,) * 5, zones=(0,) * 5)
+        started = monotonic()
+        await self._write(cue, WRITE_ACK_TIMEOUT, ttl_ms=300)
+        await asyncio.sleep(max(0.0, 0.22 - (monotonic() - started)))
+        await self.send(None)
+        print("BLE 연결 확인 | 전체 모터 200ms 한 번", flush=True)
+        return True
+
+    async def _write(self, cue, timeout, *, ttl_ms=None):
         if self.client is None or not self.client.is_connected:
             raise ConnectionError("BLE 연결이 끊어졌습니다.")
-        data = encode(self.sequence, cue, ttl_ms=1000 if cue is not None and cue.arrival_id is not None else 500)
+        if ttl_ms is None:
+            ttl_ms = 1000 if cue is not None and cue.arrival_id is not None else 500
+        data = encode(self.sequence, cue, ttl_ms=ttl_ms)
         self.last_operation = (
             f"명령 쓰기 seq={self.sequence} STOP"
             if cue is None

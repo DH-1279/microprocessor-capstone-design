@@ -133,6 +133,13 @@ class NativeMultiTests(unittest.TestCase):
         self.assertEqual(self.status(700).duties, (0, 180, 0, 0, 0))
         self.assertEqual(self.status(1100).duties, (0,) * 5)  # TTL expiry.
 
+    def test_connection_feedback_has_one_200ms_pulse_even_without_stop(self):
+        self.send(Cue(2, 0, 1, (180,) * 5, zones=(0,) * 5), 0, ttl=300)
+        for t in (0, 199):
+            self.assertEqual(self.status(t).duties, (180,) * 5)
+        for t in (200, 299, 300, 1200, 2400):
+            self.assertEqual(self.status(t).duties, (0,) * 5)
+
     def test_maximum_double_tap_once_even_after_refresh_stop_and_expiry(self):
         cue = Cue(2, 2, 1, (255,) * 5, arrival_id=10)
         self.send(cue, 0, ttl=1000)

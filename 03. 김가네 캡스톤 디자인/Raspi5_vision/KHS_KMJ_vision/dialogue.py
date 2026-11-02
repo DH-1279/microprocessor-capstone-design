@@ -6,7 +6,7 @@ from collections import deque
 HAPTIC_HELP = ("엄지는 오른쪽, 새끼는 왼쪽, 검지는 앞, 약지는 뒤, 중지는 근접입니다. "
                "획득하면 전체가 두 번 울립니다.")
 SHORT_HAPTIC_HELP = "진동을 따라 움직이세요. 획득하면 전체가 두 번 울립니다."
-STARTUP_HELP = "시스템이 준비되었습니다. 짧은 소리가 끝나면 말씀해주세요. 캡스톤이라고 말씀해주세요."
+STARTUP_HELP = "시스템이 준비되었습니다. 캡스톤이라고 말씀해주세요."
 
 
 def target_announcement_parts(name, first):

@@ -159,7 +159,7 @@ def replay(rows, *, real_runtime=False, fail_audio=False, mode=3):
     position = [-1]
     clock = [0.0]
     spoken, states = [], []
-    state = SimpleNamespace(bridge=None, audio_closed=False)
+    state = SimpleNamespace(bridge=None, audio_closed=False, tone_changes=[])
     volume = Mock(return_value=SimpleNamespace(returncode=0))
 
     class Audio:
@@ -178,6 +178,9 @@ def replay(rows, *, real_runtime=False, fail_audio=False, mode=3):
         def say_parts(self, parts):
             spoken.extend(parts)
             return True
+
+        def set_ready_tone_enabled(self, enabled):
+            state.tone_changes.append(enabled)
 
         def close(self):
             state.audio_closed = True
@@ -252,6 +255,7 @@ def replay(rows, *, real_runtime=False, fail_audio=False, mode=3):
         spoken=spoken,
         states=states,
         audio_closed=state.audio_closed,
+        tone_changes=state.tone_changes,
         code=exit_code,
         log=output.getvalue(),
         volume_calls=volume.call_args_list,
@@ -412,7 +416,7 @@ class DetectorLoopTests(unittest.TestCase):
         self.assertTrue(all(len(packet) == 16 for packet in packets))
         self.assertFalse(run.bridge.thread.is_alive())
 
-    def test_runtime_write_timeout_keeps_detector_alive_and_announces_loss(self):
+    def test_runtime_write_timeout_keeps_detector_alive_and_logs_loss_silently(self):
         attempts = []
 
         class FailingLink:
@@ -434,7 +438,8 @@ class DetectorLoopTests(unittest.TestCase):
             run = replay([{"text": "캡스톤"}, {"text": "컵"}] + [{} for _ in range(10)], real_runtime=True)
         self.assertEqual(run.code, 0, run.log)
         self.assertEqual(len(run.states), 12)
-        self.assertTrue(any("장갑 연결이 끊겼습니다" in text for text in run.spoken))
+        self.assertFalse(any("장갑 연결이 끊겼습니다" in text for text in run.spoken))
+        self.assertIn("BLE DISCONNECTED", run.log)
         self.assertEqual(sum(cue is not None for cue in attempts), 1)
         self.assertIsNone(run.bridge.error)
         self.assertFalse(run.bridge.thread.is_alive())

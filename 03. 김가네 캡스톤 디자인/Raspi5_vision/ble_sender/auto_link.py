@@ -108,6 +108,8 @@ async def run_auto(args, *, ready=None, stop_requested=None, on_fault=None, on_s
                 async with (cli.ConsoleLink() if args.dry_run else
                             cli.Link(args.address, scan_timeout=args.scan_timeout,
                                      connect_timeout=args.connect_timeout)) as link:
+                    if not args.dry_run and hasattr(link, "connection_feedback"):
+                        await link.connection_feedback()
                     controller.set_link_ready(True)  # Discard cached motion and require new frames.
                     was_ready = True
                     delay = args.retry_delay

@@ -97,8 +97,8 @@ class ReadyToneTests(unittest.TestCase):
                 self.assertEqual((audio.getnchannels(), audio.getsampwidth(), audio.getframerate(), audio.getnframes()),
                                  (1, 2, 16000, 4000))
                 samples = array("h", audio.readframes(audio.getnframes()))
-                self.assertGreater(max(map(abs, samples)), 11000)
-                self.assertLessEqual(max(map(abs, samples)), 12000)
+                self.assertGreater(max(map(abs, samples)), 5500)
+                self.assertLessEqual(max(map(abs, samples)), 6000)
             base = build_whisper_command({}, Path("in.wav"), Path("out"))
             hinted = build_whisper_command({}, Path("in.wav"), Path("out"), prompt="캡스톤 지갑")
             self.assertNotIn("--prompt", base)

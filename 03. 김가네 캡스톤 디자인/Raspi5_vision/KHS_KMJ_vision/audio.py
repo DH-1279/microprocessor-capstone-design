@@ -32,6 +32,11 @@ DEFAULTS = {
     "tts_timeout_s": 30.0,
     "cache_dir": "~/.cache/kimgane-haptic/tts",
     "input_device": None,
+    "input_backend": "sounddevice",
+    "capture_executable": "arecord",
+    "input_alsa_device": "plughw:CARD=GM20U,DEV=0",
+    "mic_retry_s": 2.0,
+    "mic_stall_s": 2.0,
     "output_device": None,
     "sample_rate": 16000,
     "block_ms": 20,
@@ -43,7 +48,7 @@ DEFAULTS = {
     "echo_cooldown_ms": 300,
     "ready_tone": True,
     "ready_tone_ms": 250,
-    "ready_tone_amplitude": 12000,
+    "ready_tone_amplitude": 6000,
 }
 
 
@@ -56,6 +61,11 @@ def audio_config(values: dict) -> dict:
         raise ValueError("audio.ready_tone must be true or false")
     if cfg["sample_rate"] != 16000:
         raise ValueError("audio.sample_rate must be 16000 for whisper-cli")
+    if cfg["input_backend"] not in {"sounddevice", "alsa"}:
+        raise ValueError("audio.input_backend must be sounddevice or alsa")
+    if cfg["input_backend"] == "alsa" and (
+            not isinstance(cfg["input_alsa_device"], str) or not cfg["input_alsa_device"].strip()):
+        raise ValueError("audio.input_alsa_device must name the ALSA capture device")
     bounds = {
         "block_ms": (10, 100), "rms_threshold": (0.0001, 0.9),
         "min_speech_ms": (40, 2000), "silence_ms": (100, 2000),
@@ -64,6 +74,7 @@ def audio_config(values: dict) -> dict:
         "stt_timeout_s": (1, 120), "tts_timeout_s": (1, 120),
         "tts_rate": (80, 300),
         "ready_tone_ms": (80, 1000), "ready_tone_amplitude": (1000, 30000),
+        "mic_retry_s": (0.1, 30), "mic_stall_s": (0.5, 30),
     }
     for key, (low, high) in bounds.items():
         value = cfg[key]
@@ -206,6 +217,8 @@ class AudioService:
         self._input_generation = 0
         self._mute_until = 0.0
         self._ready = False
+        self._input_online = True  # ALSA changes this before starting the capture worker.
+        self._tone_enabled = True
         self._ready_pending_at = None
         self._prompt_supported = False
         self._context = None
@@ -229,6 +242,8 @@ class AudioService:
                 return "STOPPED"
             if self._speaking:
                 return "SPEAKING"
+            if not self._input_online:
+                return "WAITING_MIC"
             if self._transcribing:
                 return "PROCESSING"
             if self._listening:
@@ -238,6 +253,31 @@ class AudioService:
     @property
     def input_ready(self):
         return self.input_state == "READY"
+
+    def set_ready_tone_enabled(self, enabled):
+        """BLE state only gates sound; it never blocks voice commands or queues a beep."""
+        with self._lock:
+            self._tone_enabled = bool(enabled)
+
+    def _microphone_state(self, online, reason=""):
+        with self._lock:
+            if self._stop.is_set() or online == self._input_online:
+                return
+            self._input_online = online
+            self._input_generation += 1
+            self._ready = self._listening = False
+            self._vad.reset()
+            self._ready_pending_at = (time.monotonic() + 0.15
+                                      if online and not self._speaking else None)
+            while not self._pcm.empty():
+                try:
+                    self._pcm.get_nowait()
+                except queue.Empty:
+                    break
+        if online:
+            print("마이크 연결 복구 | 새 음성 입력을 준비합니다.", flush=True)
+        else:
+            self._report(f"마이크 연결 대기 | {reason} | 자동 재시도")
 
     def set_context(self, state, names=()):
         context = (state, tuple(names))
@@ -249,7 +289,8 @@ class AudioService:
             self._vad.reset()
             self._listening = False
             self._ready = False
-            self._ready_pending_at = None if self._speaking else time.monotonic() + 0.15
+            self._ready_pending_at = (time.monotonic() + 0.15
+                                      if self._input_online and not self._speaking else None)
             while not self._pcm.empty():
                 try:
                     self._pcm.get_nowait()
@@ -316,7 +357,10 @@ class AudioService:
             raise RuntimeError("AudioService has been closed; create a new instance")
         if not self.config["enabled"]:
             return
-        for key in ("whisper_executable", "playback_executable"):
+        binaries = ["whisper_executable", "playback_executable"]
+        if self.config["input_backend"] == "alsa":
+            binaries.append("capture_executable")
+        for key in binaries:
             binary = str(Path(self.config[key]).expanduser())
             resolved = shutil.which(binary)
             if resolved is None:
@@ -338,19 +382,30 @@ class AudioService:
         self._init_supertonic()
 
         try:
-            sd = importlib.import_module("sounddevice")
-        except ImportError as exc:
-            raise RuntimeError("Install sounddevice and the system libportaudio2 package") from exc
-        try:
-            self._stream = sd.RawInputStream(
-                samplerate=self.config["sample_rate"], channels=1, dtype="int16",
-                blocksize=self.config["sample_rate"] * self.config["block_ms"] // 1000,
-                device=self.config["input_device"], callback=self._capture,
-                finished_callback=self._input_finished,
-            )
-            self._stream.start()
             self._started = True
-            self._ready_pending_at = time.monotonic() + 0.2
+            if self.config["input_backend"] == "alsa":
+                from KHS_KMJ_vision.alsa_input import AlsaMicrophone
+                self._input_online = False
+                self._ready_pending_at = None
+                self._stream = AlsaMicrophone(
+                    self.config["capture_executable"], self.config["input_alsa_device"],
+                    32 * self.config["block_ms"],
+                    lambda pcm: self._capture(pcm, len(pcm) // 2, None, None),
+                    self._microphone_state, retry_s=self.config["mic_retry_s"],
+                    stall_s=self.config["mic_stall_s"])
+                print(f"마이크 자동 복구 | {self.config['input_alsa_device']} | 재시도 {self.config['mic_retry_s']:g}초", flush=True)
+            else:
+                try:
+                    sd = importlib.import_module("sounddevice")
+                except ImportError as exc:
+                    raise RuntimeError("Install sounddevice and the system libportaudio2 package") from exc
+                self._stream = sd.RawInputStream(
+                    samplerate=self.config["sample_rate"], channels=1, dtype="int16",
+                    blocksize=self.config["sample_rate"] * self.config["block_ms"] // 1000,
+                    device=self.config["input_device"], callback=self._capture,
+                    finished_callback=self._input_finished)
+                self._ready_pending_at = time.monotonic() + 0.2
+            self._stream.start()
             for name, target in (("audio-stt", self._listen_worker), ("audio-tts", self._speak_worker)):
                 worker = threading.Thread(target=target, name=name, daemon=True)
                 self._threads.append(worker)
@@ -395,7 +450,8 @@ class AudioService:
         return True
 
     def _muted(self, timestamp: float) -> bool:
-        return not self._ready or self._speaking or self._transcribing or timestamp < self._mute_until
+        return (not self._input_online or not self._ready or self._speaking
+                or self._transcribing or timestamp < self._mute_until)
 
     def _capture(self, indata, frames, timing, status) -> None:
         if self._stop.is_set():
@@ -452,7 +508,7 @@ class AudioService:
                         self._listening = False
                         self._vad.reset()
                         self._mute_until = max(self._mute_until, time.monotonic())
-                        self._ready_pending_at = time.monotonic() + 0.15
+                        self._ready_pending_at = time.monotonic() + 0.15 if self._input_online else None
         except _Cancelled:
             pass
         except Exception as exc:
@@ -523,7 +579,9 @@ class AudioService:
         if not self._speech.empty():
             return
         try:
-            if self.config["ready_tone"]:
+            with self._lock:
+                play_tone = self.config["ready_tone"] and self._tone_enabled and self._input_online
+            if play_tone:
                 self._play_ready_tone()
             if self._stop.wait(0.05):
                 raise _Cancelled()
@@ -542,9 +600,9 @@ class AudioService:
                     break
             self._mute_until = time.monotonic()
             self._speaking = False
-            self._ready = True
+            self._ready = self._input_online
             self._ready_pending_at = None
-        print("음성 입력 준비 | 준비음이 끝나면 말씀해주세요.", flush=True)
+        print("음성 입력 준비" if self._input_online else "마이크 연결 대기 | 음성 출력은 유지합니다.", flush=True)
 
     def _play_ready_tone(self):
         self._run(self._playback_command(self.prepare_ready_tone()), 3)

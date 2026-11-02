@@ -28,7 +28,11 @@ def detector_audio_config(project_root):
         "tts_voice": "M1",  # Supertonic 보이스 스타일 (M1, F1 등)
         "cache_dir": "~/.cache/kimgane-haptic/tts",
         "ready_tone_ms": 250,
-        "ready_tone_amplitude": 12000,
+        "ready_tone_amplitude": 6000,
         "output_device": "plughw:3,0",
-        "input_device": 1,
+        "input_backend": "alsa",
+        "input_alsa_device": "plughw:CARD=GM20U,DEV=0",
+        "capture_executable": "/usr/bin/arecord",
+        "mic_retry_s": 2.0,
+        "mic_stall_s": 2.0,
     }

@@ -32,11 +32,43 @@ class AutoStartupTests(unittest.TestCase):
         self.assertEqual(result.code, 0, result.log)
         self.assertEqual(len(result.states), 5)
         self.assertEqual(result.states[-1], "SEARCHING")
-        self.assertTrue(any("장갑이 연결되지 않았습니다" in text for text in result.spoken))
+        self.assertFalse(any("장갑이 연결되지 않았습니다" in text for text in result.spoken))
+        self.assertTrue(result.tone_changes)
+        self.assertFalse(any(result.tone_changes))
         self.assertFalse(result.bridge.thread.is_alive())
 
 
 class AutoRecoveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_connection_haptic_once_per_session_before_enabling_vision(self):
+        controllers, sessions, feedback = [], [], []
+        stop = threading.Event()
+        args = detector_arguments(["--no-console", "--port", str(free_port()), "--retry-delay", "0.01"])
+        self_test = self
+        def inbox(c, changed):
+            controllers.append(c)
+            return Inbox(c, changed)
+        class Connected:
+            def __init__(self, *a, **kw):
+                self.index = len(sessions)
+                sessions.append(self)
+            async def __aenter__(self):
+                return self
+            async def connection_feedback(self):
+                self_test.assertFalse(controllers[0].link_ready)
+                feedback.append(self.index)
+            async def __aexit__(self, *a):
+                pass
+        async def transmit(c, link, *a, **kw):
+            self_test.assertTrue(c.link_ready)
+            if link.index == 0:
+                raise ConnectionError("USB off")
+            stop.set()
+            await asyncio.sleep(30)
+        with patch("ble_sender.cli.Link", Connected), patch("ble_sender.cli.Inbox", side_effect=inbox), \
+                patch("ble_sender.cli.transmit", side_effect=transmit), patch("builtins.print"):
+            await asyncio.wait_for(run(args, stop_requested=stop), 1)
+        self.assertEqual(feedback, [0, 1])
+
     async def test_idle_power_loss_is_detected_without_a_motion_write(self):
         states, sessions = [], []
         recovered = asyncio.Event()

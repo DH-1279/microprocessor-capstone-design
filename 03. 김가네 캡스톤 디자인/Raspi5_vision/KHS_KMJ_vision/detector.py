@@ -169,10 +169,8 @@ def main(argv=None):
     target_eng_label = None
     lock_id = None
     frame_id = 0
-    pending_ble_message = None
     ble_state = "OFF" if arguments.no_ble else "WAITING"
     first_haptic_help = True
-    last_ble_notice = {}
     pending_arrival_message = None
     arrival_gate = ArrivalGate(threshold=arguments.reach_px, frames=arguments.reach_frames, max_age=arguments.max_age)
     
@@ -186,6 +184,8 @@ def main(argv=None):
     tip_names = ("엄지", "검지", "중지", "약지", "새끼")
 
     try:
+        if hasattr(audio_service, "set_ready_tone_enabled"):
+            audio_service.set_ready_tone_enabled(arguments.no_ble or arguments.dry_run)
         ble.start()
         # 기존 볼륨 설정을 유지하되 믹서 응답 때문에 초기화가 멈추지 않게 한다.
         try:
@@ -215,17 +215,14 @@ def main(argv=None):
                 while notice is not None:
                     if isinstance(notice, dict):
                         ble_state = notice["state"]
-                        now_notice = time.monotonic()
-                        if now_notice - last_ble_notice.get(ble_state, -float("inf")) >= 10:
-                            pending_ble_message = notice["message"]
-                            last_ble_notice[ble_state] = now_notice
+                        # BLE availability is shown/logged, never turned into
+                        # recurring speech or ready beeps. Connection has a haptic cue.
+                        if hasattr(audio_service, "set_ready_tone_enabled"):
+                            audio_service.set_ready_tone_enabled(
+                                ble_state == "CONNECTED" or arguments.no_ble or arguments.dry_run)
                     else:
                         print(f"진동 안내 통신 중단: {notice}")
-                        pending_ble_message = "진동 안내가 중단되었습니다. 연결 상태를 확인해주세요."
                     notice = ble.pop_notice()
-                if pending_ble_message:
-                    announcements.say(pending_ble_message)
-                    pending_ble_message = None
                 if pending_arrival_message and announcements.say(pending_arrival_message):
                     pending_arrival_message = None
                 announcements.flush()
