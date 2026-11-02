@@ -175,6 +175,10 @@ def replay(rows, *, real_runtime=False, fail_audio=False, mode=3):
             spoken.append(text)
             return True
 
+        def say_parts(self, parts):
+            spoken.extend(parts)
+            return True
+
         def close(self):
             state.audio_closed = True
 

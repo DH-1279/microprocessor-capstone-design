@@ -24,7 +24,8 @@ from audio import AudioService
 import speech  # 문법 및 자모 편집 거리 기반 음성 파서
 from ble_sender.integration import DetectorBLE, detector_arguments
 from ble_sender.arrival import ArrivalGate, palm_center
-from KHS_KMJ_vision.dialogue import Announcements, HAPTIC_HELP, target_announcement
+from KHS_KMJ_vision.dialogue import Announcements, HAPTIC_HELP, STARTUP_HELP, target_announcement_parts
+from KHS_KMJ_vision.voice_profile import TARGET_MAPPING, detector_audio_config
 
 # ==========================================
 # [긴급 패치 1] HailoRT physical.identify().device_architecture 우회
@@ -88,20 +89,6 @@ BASE_DIR = Path(__file__).resolve().parent
 HEF_PATH = str(BASE_DIR / "models" / "best.hef")
 LABELS_PATH = str(BASE_DIR / "config" / "labels.txt")
 HAND_MODEL_PATH = str(Path(PROJECT_ROOT) / "models" / "hand_landmarker.task")
-
-TARGET_MAPPING = {
-    "Earbud": {"name": "이어폰", "aliases": ["이어폰", "무선이어폰", "이어버드"]},
-    "bottle": {"name": "물병", "aliases": ["물병", "병", "페트병"]},
-    "cell phone": {"name": "휴대폰", "aliases": ["휴대폰", "스마트폰", "핸드폰", "폰"]},
-    "cup": {"name": "컵", "aliases": ["컵", "머그컵", "종이컵"]},
-    "remote": {"name": "리모컨", "aliases": ["리모컨", "리모콘"]},
-    "Glasses": {"name": "안경", "aliases": ["안경", "돋보기"]},
-    "Medicine": {"name": "약통", "aliases": ["약통", "약"]},
-    "key": {"name": "열쇠", "aliases": ["열쇠", "키", "차키"]},
-    "Pen": {"name": "볼펜", "aliases": ["볼펜", "펜", "연필"]},
-    "Tumbler": {"name": "텀블러", "aliases": ["텀블러", "보온병"]},
-    "Wallet": {"name": "지갑", "aliases": ["지갑", "카드지갑"]}
-}
 
 WAKE_WORDS = ("캡스톤", "갭스톤", "캡손", "캐스톤", "캡스", "캡스턴")
 WAKE_THRESHOLD = 0.35
@@ -173,17 +160,7 @@ def main(argv=None):
         "device": 0
     }
 
-    audio_config = {
-        "enabled": True,
-        "whisper_executable": "/home/dh1279/Desktop/kimGA_raspi/whisper.cpp/build/bin/whisper-cli",
-        "whisper_model": str(Path(PROJECT_ROOT) / "models" / "ggml-tiny.bin"),
-        "tts_executable": "/usr/bin/espeak-ng",
-        "playback_executable": "/usr/bin/aplay",
-        "tts_voice": "M1",  # Supertonic 보이스 스타일 (M1, F1 등)
-        "cache_dir": "~/.cache/kimgane-haptic/tts",
-        "output_device": "plughw:3,0",
-        "input_device": 1 
-    }
+    audio_config = detector_audio_config(PROJECT_ROOT)
 
     command_queue = queue.Queue()
     audio_service = AudioService(audio_config, on_text=command_queue.put_nowait)
@@ -220,7 +197,7 @@ def main(argv=None):
             pass
         audio_service.start()
         print("초기화 완료. 시동어 '캡스톤'을 기다리는 중...")
-        announcements.say("시스템이 준비되었습니다. 짧은 소리가 끝나면 말씀해주세요. 캡스톤이라고 말씀해주세요.")
+        announcements.say(STARTUP_HELP)
         with CameraSource(config) as cam, \
              HailoDetector(config) as detector, \
              HandTracker(config) as tracker:
@@ -330,7 +307,7 @@ def main(argv=None):
                                 no_hand_since = time.monotonic()  # 탐색 진입 시 손 미인식 타이머 시작
 
                                 print(f"🎯 타겟 설정 완료: {target_kor} (매칭 별칭: {intent.detail})")
-                                announcements.say(target_announcement(target_kor, first_haptic_help))
+                                announcements.say_parts(target_announcement_parts(target_kor, first_haptic_help))
                                 first_haptic_help = False
                             else:
                                 target_kor = get_korean_name(matched)

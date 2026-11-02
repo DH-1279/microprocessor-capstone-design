@@ -1,4 +1,5 @@
 import tempfile
+from array import array
 import threading
 import time
 import unittest
@@ -92,9 +93,12 @@ class ReadyToneTests(unittest.TestCase):
             service = AudioService({"cache_dir": directory}, lambda _: None)
             service._run = Mock()
             service._play_ready_tone()
-            with wave.open(str(Path(directory) / "input-ready-v1.wav")) as audio:
+            with wave.open(str(service.ready_tone_path())) as audio:
                 self.assertEqual((audio.getnchannels(), audio.getsampwidth(), audio.getframerate(), audio.getnframes()),
-                                 (1, 2, 16000, 1280))
+                                 (1, 2, 16000, 4000))
+                samples = array("h", audio.readframes(audio.getnframes()))
+                self.assertGreater(max(map(abs, samples)), 11000)
+                self.assertLessEqual(max(map(abs, samples)), 12000)
             base = build_whisper_command({}, Path("in.wav"), Path("out"))
             hinted = build_whisper_command({}, Path("in.wav"), Path("out"), prompt="캡스톤 지갑")
             self.assertNotIn("--prompt", base)

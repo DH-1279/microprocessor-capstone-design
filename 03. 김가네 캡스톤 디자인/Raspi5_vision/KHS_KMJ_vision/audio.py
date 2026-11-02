@@ -42,6 +42,8 @@ DEFAULTS = {
     "pre_roll_ms": 200,
     "echo_cooldown_ms": 300,
     "ready_tone": True,
+    "ready_tone_ms": 250,
+    "ready_tone_amplitude": 12000,
 }
 
 
@@ -61,6 +63,7 @@ def audio_config(values: dict) -> dict:
         "echo_cooldown_ms": (0, 2000), "whisper_threads": (1, 4),
         "stt_timeout_s": (1, 120), "tts_timeout_s": (1, 120),
         "tts_rate": (80, 300),
+        "ready_tone_ms": (80, 1000), "ready_tone_amplitude": (1000, 30000),
     }
     for key, (low, high) in bounds.items():
         value = cfg[key]
@@ -68,7 +71,7 @@ def audio_config(values: dict) -> dict:
             raise ValueError(f"audio.{key} must be numeric")
         if not math.isfinite(value) or not low <= value <= high:
             raise ValueError(f"audio.{key} must be between {low} and {high}")
-    for key in ("block_ms", "whisper_threads", "tts_rate"):
+    for key in ("block_ms", "whisper_threads", "tts_rate", "ready_tone_ms", "ready_tone_amplitude"):
         if int(cfg[key]) != cfg[key]:
             raise ValueError(f"audio.{key} must be an integer")
         cfg[key] = int(cfg[key])
@@ -166,6 +169,14 @@ def tts_cache_path(config: dict, text: str) -> Path:
     return Path(config["cache_dir"]).expanduser() / f"{digest}.wav"
 
 
+def valid_wav(path) -> bool:
+    try:
+        with wave.open(str(path), "rb") as audio:
+            return audio.getnframes() > 0
+    except (OSError, EOFError, wave.Error):
+        return False
+
+
 class _Cancelled(Exception):
     pass
 
@@ -179,8 +190,9 @@ class AudioService:
         self._stop = threading.Event()
         self._lock = threading.Lock()
         self._pcm: queue.Queue[tuple[float, bytes]] = queue.Queue(maxsize=25)
-        self._speech: queue.Queue[str] = queue.Queue(maxsize=8)
+        self._speech: queue.Queue[str | tuple[str, ...]] = queue.Queue(maxsize=8)
         self._pending_texts = set()
+        self._queued_at = {}
         self._errors: queue.Queue[str] = queue.Queue(maxsize=8)
         self._threads: list[threading.Thread] = []
         self._processes: set[subprocess.Popen] = set()
@@ -349,20 +361,34 @@ class AudioService:
 
     def say(self, text: str) -> bool:
         text = text.strip()
-        if not self._started or self._stop.is_set() or not text:
+        return self._enqueue(text) if text else False
+
+    def say_parts(self, parts) -> bool:
+        """Atomically enqueue one speech turn; the ready tone follows all clips."""
+        parts = tuple(part.strip() for part in parts if part.strip())
+        if not parts:
             return False
-        if len(text) > 300:
+        if len(parts) > 8:
+            raise ValueError("A speech turn supports at most 8 clips")
+        return self._enqueue(parts)
+
+    def _enqueue(self, job) -> bool:
+        if not self._started or self._stop.is_set():
+            return False
+        parts = (job,) if isinstance(job, str) else job
+        if sum(map(len, parts)) > 300:
             raise ValueError("Announcement exceeds the 300-character limit")
         with self._lock:
-            if text in self._pending_texts:
+            if job in self._pending_texts:
                 return True
             if self._listening or self._transcribing:
                 return False
             try:
-                self._speech.put_nowait(text)
+                self._speech.put_nowait(job)
             except queue.Full:
                 return False
-            self._pending_texts.add(text)
+            self._pending_texts.add(job)
+            self._queued_at[job] = time.monotonic()
             self._speaking = True
             self._ready = False
             self._ready_pending_at = None
@@ -456,7 +482,7 @@ class AudioService:
         try:
             while not self._stop.is_set():
                 try:
-                    text = self._speech.get(timeout=0.05)
+                    job = self._speech.get(timeout=0.05)
                 except queue.Empty:
                     with self._lock:
                         pending = (not self._speaking and not self._transcribing and not self._listening
@@ -468,7 +494,11 @@ class AudioService:
                         self._finish_output()
                     continue
                 try:
-                    self._play(text)
+                    with self._lock:
+                        queued_at = self._queued_at.pop(job, time.monotonic())
+                    print(f"TTS 대기 | {(time.monotonic() - queued_at) * 1000:.0f}ms", flush=True)
+                    for text in ((job,) if isinstance(job, str) else job):
+                        self._play(text)
                 except _Cancelled:
                     break
                 except Exception as exc:
@@ -476,7 +506,8 @@ class AudioService:
                     self._report(f"Audio output/TTS failed: {exc}")
                 finally:
                     with self._lock:
-                        self._pending_texts.discard(text)
+                        self._pending_texts.discard(job)
+                        self._queued_at.pop(job, None)
                     self._finish_output()
         except _Cancelled:
             pass
@@ -516,31 +547,58 @@ class AudioService:
         print("음성 입력 준비 | 준비음이 끝나면 말씀해주세요.", flush=True)
 
     def _play_ready_tone(self):
-        path = Path(self.config["cache_dir"]).expanduser() / "input-ready-v1.wav"
+        self._run(self._playback_command(self.prepare_ready_tone()), 3)
+
+    def prepare_ready_tone(self):
+        """Version and parameters prevent reuse of the old, quieter 80ms file."""
+        duration = self.config["ready_tone_ms"]
+        amplitude = self.config["ready_tone_amplitude"]
+        path = self.ready_tone_path()
         path.parent.mkdir(parents=True, exist_ok=True)
-        if not path.is_file():
+        if not valid_wav(path):
             samples = array("h")
-            count = 1280  # 80ms, 16kHz, mono PCM16. No TTS synthesis required.
+            count = 16 * duration  # 16kHz, mono PCM16; no TTS synthesis.
             for n in range(count):
                 fade = min(1, n / 160, (count - 1 - n) / 160)
-                samples.append(int(5000 * fade * math.sin(2 * math.pi * 880 * n / 16000)))
+                samples.append(int(amplitude * fade * math.sin(2 * math.pi * 880 * n / 16000)))
             if sys.byteorder != "little":
                 samples.byteswap()
-            with wave.open(str(path), "wb") as output:
-                output.setparams((1, 2, 16000, 0, "NONE", "not compressed"))
-                output.writeframes(samples.tobytes())
+            with tempfile.TemporaryDirectory(prefix="tone-", dir=path.parent) as directory:
+                temporary = Path(directory) / "tone.wav"
+                with wave.open(str(temporary), "wb") as output:
+                    output.setparams((1, 2, 16000, 0, "NONE", "not compressed"))
+                    output.writeframes(samples.tobytes())
+                temporary.replace(path)
+        return path
+
+    def ready_tone_path(self):
+        duration = self.config["ready_tone_ms"]
+        amplitude = self.config["ready_tone_amplitude"]
+        return Path(self.config["cache_dir"]).expanduser() / f"input-ready-v2-{duration}-{amplitude}.wav"
+
+    def _playback_command(self, path):
         command = [self.config["playback_executable"], "-q"]
         if self.config["output_device"] is not None:
             command.extend(["-D", str(self.config["output_device"])])
-        self._run(command + [str(path)], 3)
+        return command + [str(path)]
 
     def _play(self, text: str) -> None:
+        target = self.prepare_speech(text)
+        print(f"TTS 재생 요청 | {text}", flush=True)
+        self._run(self._playback_command(target), self.config["tts_timeout_s"])
+
+    def prepare_speech(self, text: str) -> Path:
+        """Build a cached WAV without playback, microphone, camera or BLE."""
         if self._stop.is_set():
             raise _Cancelled()
+        if not text.strip() or len(text) > 300:
+            raise ValueError("Speech text must contain 1..300 characters")
+        started = time.monotonic()
         cfg = self.config
         target = tts_cache_path(cfg, text)
         target.parent.mkdir(parents=True, exist_ok=True)
-        if not target.is_file():
+        cached = valid_wav(target)
+        if not cached:
             with tempfile.TemporaryDirectory(prefix="tts-", dir=target.parent) as directory:
                 temporary = Path(directory) / "speech.wav"
                 
@@ -562,11 +620,8 @@ class AudioService:
                         raise RuntimeError("Supertonic TTS generated an empty WAV")
                 temporary.replace(target)
                 
-        command = [cfg["playback_executable"], "-q"]
-        if cfg["output_device"] is not None:
-            command.extend(["-D", str(cfg["output_device"])])
-        command.append(str(target))
-        self._run(command, cfg["tts_timeout_s"])
+        print(f"TTS {'캐시' if cached else '합성'} | {(time.monotonic() - started) * 1000:.0f}ms | {text}", flush=True)
+        return target
 
     def _run(self, command: list[str], timeout: float, input_text: str | None = None) -> str:
         with self._lock:
