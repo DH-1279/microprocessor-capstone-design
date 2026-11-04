@@ -6,6 +6,7 @@ accepts RGB HEFs with one NMS-by-class output, not arbitrary YOLO tensors.
 
 from __future__ import annotations
 
+from KHS_KMJ_vision.hand_tracker import HandTracker, draw_hand
 from contextlib import ExitStack
 from dataclasses import dataclass
 import math
@@ -295,17 +296,38 @@ class MediaPipeHandTracker:
         return False
 
 
+def full_fov_sensor_mode(modes: list[dict], fps: float) -> dict:
+    """Choose maximum sensor coverage first, then the smallest usable readout.
+
+    crop_limits are (x, y, width, height) in full sensor coordinates. A fast
+    central crop must not silently replace full coverage when FPS is too high.
+    """
+    if not modes:
+        raise ValueError("Camera reports no sensor modes")
+    coverage = max(mode["crop_limits"][2] * mode["crop_limits"][3] for mode in modes)
+    widest = [mode for mode in modes if mode["crop_limits"][2] * mode["crop_limits"][3] == coverage]
+    usable = [mode for mode in widest if mode["fps"] >= fps]
+    if not usable:
+        maximum = max(mode["fps"] for mode in widest)
+        raise ValueError(f"Full sensor coverage supports at most {maximum:.2f} FPS; requested {fps}")
+    return min(usable, key=lambda mode: (mode["size"][0] * mode["size"][1], -mode["bit_depth"]))
+
+
 class CameraSource:
     """CSI via Picamera2 or OpenCV USB/local-video input; returns RGB."""
 
-    def __init__(self, config: dict):
+    def __init__(self, config: dict, *, full_fov: bool = False):
         self.config = config
+        self.full_fov = full_fov
+        self.full_fov_info: dict | None = None
         self.camera: Any = None
         self.capture: Any = None
         self.replay = False
 
     def __enter__(self):
         source = self.config.get("source", "picamera2")
+        if self.full_fov and source != "picamera2":
+            raise ValueError("Full sensor coverage is only supported for Picamera2")
         width, height = int(self.config.get("width", 640)), int(self.config.get("height", 480))
         fps = float(self.config.get("fps", 15))
         if source == "picamera2":
@@ -313,10 +335,26 @@ class CameraSource:
 
             self.camera = Picamera2(camera_num=int(self.config.get("device", 0)))
             try:
+                sensor = {}
+                if self.full_fov:
+                    mode = full_fov_sensor_mode(self.camera.sensor_modes, fps)
+                    crop = mode["crop_limits"]
+                    # Match the native crop aspect rather than crop it to 4:3
+                    # or squeeze 16:9 into 4:3. Width remains the requested size.
+                    height = max(2, 2 * round(width * crop[3] / crop[2] / 2))
+                    sensor = {"output_size": mode["size"], "bit_depth": mode["bit_depth"]}
                 # libcamera BGR888 produces RGB bytes; RGB888 produces BGR bytes.
                 self.camera.configure(self.camera.create_video_configuration(
                     main={"size": (width, height), "format": "BGR888"},
-                    controls={"FrameRate": fps}, buffer_count=4, queue=False))
+                    controls={"FrameRate": fps}, buffer_count=4, queue=False, sensor=sensor))
+                if self.full_fov:
+                    active = self.camera.camera_configuration()["sensor"]
+                    if tuple(active["output_size"]) != tuple(sensor["output_size"]):
+                        raise RuntimeError("Camera did not apply the requested full-coverage sensor mode")
+                    crop_max = tuple(self.camera.camera_properties["ScalerCropMaximum"])
+                    self.camera.set_controls({"ScalerCrop": crop_max})
+                    self.full_fov_info = {"sensor": tuple(active["output_size"]), "crop": crop_max,
+                                          "output": (width, height)}
                 self.camera.start()
             except BaseException:
                 self.camera.close()
@@ -447,7 +485,7 @@ def run_vision(config: dict, emit: Callable[[Observation], None], stop: threadin
     detector_type = HailoDetector if detector_name == "hailo" else UltralyticsDetector
     with ExitStack() as resources:
         detector = resources.enter_context(detector_type(config))
-        tracker = resources.enter_context(MediaPipeHandTracker(config))
+        tracker = resources.enter_context(HandTracker(config))
         source = resources.enter_context(CameraSource(config))
         frames = resources.enter_context(LatestFrames(source))
         if config.get("show_preview", False):

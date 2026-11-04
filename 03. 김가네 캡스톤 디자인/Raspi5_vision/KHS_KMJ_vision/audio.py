@@ -1,0 +1,745 @@
+"""Local Korean voice input/output with Supertonic Python TTS."""
+
+from __future__ import annotations
+
+from array import array
+from collections import deque
+import hashlib
+import importlib
+import math
+from pathlib import Path
+import queue
+import shutil
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+from typing import Any, Callable
+import wave
+
+
+DEFAULTS = {
+    "enabled": False,
+    "whisper_executable": "whisper-cli",
+    "whisper_model": "",
+    "whisper_threads": 2,
+    "stt_timeout_s": 30.0,
+    "tts_executable": "espeak-ng",
+    "playback_executable": "aplay",
+    "tts_voice": "M1",
+    "tts_rate": 155,
+    "tts_timeout_s": 30.0,
+    "cache_dir": "~/.cache/kimgane-haptic/tts",
+    "input_device": None,
+    "input_backend": "sounddevice",
+    "capture_executable": "arecord",
+    "input_alsa_device": "plughw:CARD=GM20U,DEV=0",
+    "mic_retry_s": 2.0,
+    "mic_stall_s": 2.0,
+    "output_device": None,
+    "sample_rate": 16000,
+    "block_ms": 20,
+    "rms_threshold": 0.015,
+    "min_speech_ms": 200,
+    "silence_ms": 650,
+    "max_utterance_ms": 5000,
+    "pre_roll_ms": 200,
+    "echo_cooldown_ms": 300,
+    "ready_tone": True,
+    "ready_tone_ms": 250,
+    "ready_tone_amplitude": 6000,
+}
+
+
+def audio_config(values: dict) -> dict:
+    """Validate timing before opening hardware or allocating audio buffers."""
+    cfg = {**DEFAULTS, **values}
+    if not isinstance(cfg["enabled"], bool):
+        raise ValueError("audio.enabled must be true or false")
+    if not isinstance(cfg["ready_tone"], bool):
+        raise ValueError("audio.ready_tone must be true or false")
+    if cfg["sample_rate"] != 16000:
+        raise ValueError("audio.sample_rate must be 16000 for whisper-cli")
+    if cfg["input_backend"] not in {"sounddevice", "alsa"}:
+        raise ValueError("audio.input_backend must be sounddevice or alsa")
+    if cfg["input_backend"] == "alsa" and (
+            not isinstance(cfg["input_alsa_device"], str) or not cfg["input_alsa_device"].strip()):
+        raise ValueError("audio.input_alsa_device must name the ALSA capture device")
+    bounds = {
+        "block_ms": (10, 100), "rms_threshold": (0.0001, 0.9),
+        "min_speech_ms": (40, 2000), "silence_ms": (100, 2000),
+        "max_utterance_ms": (500, 15000), "pre_roll_ms": (0, 1000),
+        "echo_cooldown_ms": (0, 2000), "whisper_threads": (1, 4),
+        "stt_timeout_s": (1, 120), "tts_timeout_s": (1, 120),
+        "tts_rate": (80, 300),
+        "ready_tone_ms": (80, 1000), "ready_tone_amplitude": (1000, 30000),
+        "mic_retry_s": (0.1, 30), "mic_stall_s": (0.5, 30),
+    }
+    for key, (low, high) in bounds.items():
+        value = cfg[key]
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"audio.{key} must be numeric")
+        if not math.isfinite(value) or not low <= value <= high:
+            raise ValueError(f"audio.{key} must be between {low} and {high}")
+    for key in ("block_ms", "whisper_threads", "tts_rate", "ready_tone_ms", "ready_tone_amplitude"):
+        if int(cfg[key]) != cfg[key]:
+            raise ValueError(f"audio.{key} must be an integer")
+        cfg[key] = int(cfg[key])
+    if cfg["min_speech_ms"] + cfg["silence_ms"] > cfg["max_utterance_ms"]:
+        raise ValueError("audio max_utterance_ms must allow speech and trailing silence")
+    model_name = Path(cfg["whisper_model"]).name.lower()
+    if ".en." in model_name or ".en-" in model_name or model_name.endswith(".en"):
+        raise ValueError("Korean STT requires a multilingual model, not an .en model")
+    return cfg
+
+
+def pcm16_rms(pcm: bytes) -> float:
+    """RMS in [0, 1] for mono little-endian signed PCM16, without audioop/numpy."""
+    if len(pcm) % 2:
+        raise ValueError("PCM16 data must have an even byte count")
+    if not pcm:
+        return 0.0
+    samples = array("h")
+    samples.frombytes(pcm)
+    if sys.byteorder != "little":
+        samples.byteswap()
+    return math.sqrt(sum(int(x) * int(x) for x in samples) / len(samples)) / 32768
+
+
+class UtteranceDetector:
+    """Simple energy VAD. Bounds utterances; requires voiced duration, not noise gaps."""
+
+    def __init__(self, config: dict):
+        self.config = audio_config(config)
+        self.reset()
+
+    def reset(self) -> None:
+        self.active = False
+        self._pre: deque[bytes] = deque()
+        self._pre_samples = 0
+        self._parts: list[bytes] = []
+        self._samples = 0
+        self._voiced = 0
+        self._silence = 0
+
+    def feed(self, pcm: bytes, *, muted: bool = False) -> bytes | None:
+        if muted:
+            self.reset()
+            return None
+        rms = pcm16_rms(pcm)
+        samples = len(pcm) // 2
+        if not samples:
+            return None
+        cfg = self.config
+        loud = rms >= cfg["rms_threshold"]
+        per_ms = cfg["sample_rate"] / 1000
+        if not self.active:
+            if not loud:
+                self._pre.append(pcm)
+                self._pre_samples += samples
+                limit = int(cfg["pre_roll_ms"] * per_ms)
+                while self._pre and self._pre_samples > limit:
+                    self._pre_samples -= len(self._pre.popleft()) // 2
+                return None
+            self.active = True
+            self._parts = list(self._pre)
+            self._samples = self._pre_samples
+            self._pre.clear()
+            self._pre_samples = 0
+        self._parts.append(pcm)
+        self._samples += samples
+        self._voiced += samples if loud else 0
+        self._silence = 0 if loud else self._silence + samples
+        max_samples = int(cfg["max_utterance_ms"] * per_ms)
+        finished = (self._silence >= cfg["silence_ms"] * per_ms
+                    or self._samples >= max_samples)
+        if not finished:
+            return None
+        result = None
+        if self._voiced >= cfg["min_speech_ms"] * per_ms:
+            result = b"".join(self._parts)[:max_samples * 2]
+        self.reset()
+        return result
+
+
+def build_whisper_command(config: dict, wav_path: Path, output_base: Path, *, prompt=None) -> list[str]:
+    cfg = audio_config(config)
+    command = [str(Path(cfg["whisper_executable"]).expanduser()),
+            "-m", str(Path(cfg["whisper_model"]).expanduser()),
+            "-l", "ko", "-t", str(cfg["whisper_threads"]),
+            "-f", str(wav_path), "-otxt", "-of", str(output_base), "-nt", "-np"]
+    if prompt:
+        command.extend(["--prompt", str(prompt)[:256]])
+    return command
+
+
+def tts_cache_path(config: dict, text: str) -> Path:
+    key = f"supertonic\0{config['tts_voice']}\0{text}"
+    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
+    return Path(config["cache_dir"]).expanduser() / f"{digest}.wav"
+
+
+def valid_wav(path) -> bool:
+    try:
+        with wave.open(str(path), "rb") as audio:
+            return audio.getnframes() > 0
+    except (OSError, EOFError, wave.Error):
+        return False
+
+
+class _Cancelled(Exception):
+    pass
+
+
+class AudioService:
+    """Two bounded workers for capture/STT and TTS, with explicit error reporting."""
+
+    def __init__(self, config: dict, on_text: Callable[[str], None]):
+        self.config = audio_config(config)
+        self.on_text = on_text
+        self._stop = threading.Event()
+        self._lock = threading.Lock()
+        self._pcm: queue.Queue[tuple[float, bytes]] = queue.Queue(maxsize=25)
+        self._speech: queue.Queue[str | tuple[str, ...]] = queue.Queue(maxsize=8)
+        self._pending_texts = set()
+        self._queued_at = {}
+        self._errors: queue.Queue[str] = queue.Queue(maxsize=8)
+        self._threads: list[threading.Thread] = []
+        self._processes: set[subprocess.Popen] = set()
+        self._stream: Any = None
+        self._tts_engine: Any = None
+        self._tts_style: Any = None
+        self._started = False
+        self._speaking = False
+        self._listening = False
+        self._transcribing = False
+        self._input_generation = 0
+        self._mute_until = 0.0
+        self._ready = False
+        self._input_online = True  # ALSA changes this before starting the capture worker.
+        self._tone_enabled = True
+        self._ready_pending_at = None
+        self._prompt_supported = False
+        self._context = None
+        self._prompt = "한국어 음성 명령. 시동어는 캡스톤입니다."
+        self._vad = UtteranceDetector(self.config)
+
+    @property
+    def speaking(self) -> bool:
+        with self._lock:
+            return self._speaking
+
+    @property
+    def listening(self) -> bool:
+        with self._lock:
+            return self._listening or self._transcribing
+
+    @property
+    def input_state(self):
+        with self._lock:
+            if self._stop.is_set():
+                return "STOPPED"
+            if self._speaking:
+                return "SPEAKING"
+            if not self._input_online:
+                return "WAITING_MIC"
+            if self._transcribing:
+                return "PROCESSING"
+            if self._listening:
+                return "LISTENING"
+            return "READY" if self._ready else "PREPARING"
+
+    @property
+    def input_ready(self):
+        return self.input_state == "READY"
+
+    def set_ready_tone_enabled(self, enabled):
+        """BLE state only gates sound; it never blocks voice commands or queues a beep."""
+        with self._lock:
+            self._tone_enabled = bool(enabled)
+
+    def _microphone_state(self, online, reason=""):
+        with self._lock:
+            if self._stop.is_set() or online == self._input_online:
+                return
+            self._input_online = online
+            self._input_generation += 1
+            self._ready = self._listening = False
+            self._vad.reset()
+            self._ready_pending_at = (time.monotonic() + 0.15
+                                      if online and not self._speaking else None)
+            while not self._pcm.empty():
+                try:
+                    self._pcm.get_nowait()
+                except queue.Empty:
+                    break
+        if online:
+            print("마이크 연결 복구 | 새 음성 입력을 준비합니다.", flush=True)
+        else:
+            self._report(f"마이크 연결 대기 | {reason} | 자동 재시도")
+
+    def set_context(self, state, names=()):
+        context = (state, tuple(names))
+        with self._lock:
+            if context == self._context:
+                return
+            self._context = context
+            self._input_generation += 1
+            self._vad.reset()
+            self._listening = False
+            self._ready = False
+            self._ready_pending_at = (time.monotonic() + 0.15
+                                      if self._input_online and not self._speaking else None)
+            while not self._pcm.empty():
+                try:
+                    self._pcm.get_nowait()
+                except queue.Empty:
+                    break
+            if state == "WAIT_WAKE":
+                self._prompt = "한국어 음성 명령. 시동어는 캡스톤입니다. 취소, 설명."
+            elif state == "WAIT_TARGET":
+                self._prompt = "한국어 물건 이름: " + ", ".join(names) + ". 취소, 목록, 설명."
+            else:
+                self._prompt = "한국어 안내 명령: 취소, 정지, 목록, 다시, 설명."
+
+    def get_error(self) -> str | None:
+        try:
+            return self._errors.get_nowait()
+        except queue.Empty:
+            return None
+
+    def discard_input(self) -> None:
+        with self._lock:
+            self._input_generation += 1
+            self._mute_until = max(self._mute_until, time.monotonic())
+            self._vad.reset()
+            self._listening = False
+            while True:
+                try:
+                    self._pcm.get_nowait()
+                except queue.Empty:
+                    break
+
+    def _report(self, message: str) -> None:
+        try:
+            self._errors.put_nowait(message)
+        except queue.Full:
+            try:
+                self._errors.get_nowait()
+            except queue.Empty:
+                pass
+            try:
+                self._errors.put_nowait(message)
+            except queue.Full:
+                pass
+
+    def _init_supertonic(self) -> None:
+        """Supertonic 파이썬 패키지를 메모리에 한 번만 로드합니다."""
+        if self._tts_engine is not None:
+            return
+        from supertonic import TTS
+        print("🔊 Supertonic TTS 모델을 로드하는 중...")
+        self._tts_engine = TTS(auto_download=True)
+        voice_name = self.config.get("tts_voice", "M1")
+        if voice_name in getattr(self._tts_engine, "voice_style_names", []):
+            self._tts_style = self._tts_engine.get_voice_style(voice_name)
+        elif getattr(self._tts_engine, "voice_style_names", None):
+            self._tts_style = self._tts_engine.get_voice_style(self._tts_engine.voice_style_names[0])
+        else:
+            self._tts_style = self._tts_engine.get_voice_style("M1")
+        print("✅ Supertonic TTS 모델 로드 완료!")
+
+    def start(self) -> None:
+        if self._started:
+            return
+        if self._stop.is_set():
+            raise RuntimeError("AudioService has been closed; create a new instance")
+        if not self.config["enabled"]:
+            return
+        binaries = ["whisper_executable", "playback_executable"]
+        if self.config["input_backend"] == "alsa":
+            binaries.append("capture_executable")
+        for key in binaries:
+            binary = str(Path(self.config[key]).expanduser())
+            resolved = shutil.which(binary)
+            if resolved is None:
+                raise RuntimeError(f"Audio executable missing: {key}={binary}")
+            self.config[key] = resolved
+        model = Path(self.config["whisper_model"]).expanduser()
+        if not model.is_file() or model.stat().st_size == 0:
+            raise RuntimeError(f"Whisper multilingual model missing or empty: {model}")
+        self.config["whisper_model"] = str(model.resolve())
+        try:
+            help_result = subprocess.run([self.config["whisper_executable"], "--help"],
+                                         capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=3)
+            self._prompt_supported = "--prompt" in (help_result.stdout + help_result.stderr)
+        except (OSError, subprocess.TimeoutExpired):
+            self._prompt_supported = False
+        print(f"STT | language=ko | 단어 힌트={'지원' if self._prompt_supported else '미지원: 별칭으로 처리'}")
+        Path(self.config["cache_dir"]).expanduser().mkdir(parents=True, exist_ok=True)
+        
+        self._init_supertonic()
+
+        try:
+            self._started = True
+            if self.config["input_backend"] == "alsa":
+                from KHS_KMJ_vision.alsa_input import AlsaMicrophone
+                self._input_online = False
+                self._ready_pending_at = None
+                self._stream = AlsaMicrophone(
+                    self.config["capture_executable"], self.config["input_alsa_device"],
+                    32 * self.config["block_ms"],
+                    lambda pcm: self._capture(pcm, len(pcm) // 2, None, None),
+                    self._microphone_state, retry_s=self.config["mic_retry_s"],
+                    stall_s=self.config["mic_stall_s"])
+                print(f"마이크 자동 복구 | {self.config['input_alsa_device']} | 재시도 {self.config['mic_retry_s']:g}초", flush=True)
+            else:
+                try:
+                    sd = importlib.import_module("sounddevice")
+                except ImportError as exc:
+                    raise RuntimeError("Install sounddevice and the system libportaudio2 package") from exc
+                self._stream = sd.RawInputStream(
+                    samplerate=self.config["sample_rate"], channels=1, dtype="int16",
+                    blocksize=self.config["sample_rate"] * self.config["block_ms"] // 1000,
+                    device=self.config["input_device"], callback=self._capture,
+                    finished_callback=self._input_finished)
+                self._ready_pending_at = time.monotonic() + 0.2
+            self._stream.start()
+            for name, target in (("audio-stt", self._listen_worker), ("audio-tts", self._speak_worker)):
+                worker = threading.Thread(target=target, name=name, daemon=True)
+                self._threads.append(worker)
+                worker.start()
+        except Exception:
+            self.close()
+            raise
+
+    def say(self, text: str) -> bool:
+        text = text.strip()
+        return self._enqueue(text) if text else False
+
+    def say_parts(self, parts) -> bool:
+        """Atomically enqueue one speech turn; the ready tone follows all clips."""
+        parts = tuple(part.strip() for part in parts if part.strip())
+        if not parts:
+            return False
+        if len(parts) > 8:
+            raise ValueError("A speech turn supports at most 8 clips")
+        return self._enqueue(parts)
+
+    def _enqueue(self, job) -> bool:
+        if not self._started or self._stop.is_set():
+            return False
+        parts = (job,) if isinstance(job, str) else job
+        if sum(map(len, parts)) > 300:
+            raise ValueError("Announcement exceeds the 300-character limit")
+        with self._lock:
+            if job in self._pending_texts:
+                return True
+            if self._listening or self._transcribing:
+                return False
+            try:
+                self._speech.put_nowait(job)
+            except queue.Full:
+                return False
+            self._pending_texts.add(job)
+            self._queued_at[job] = time.monotonic()
+            self._speaking = True
+            self._ready = False
+            self._ready_pending_at = None
+        return True
+
+    def _muted(self, timestamp: float) -> bool:
+        return (not self._input_online or not self._ready or self._speaking
+                or self._transcribing or timestamp < self._mute_until)
+
+    def _capture(self, indata, frames, timing, status) -> None:
+        if self._stop.is_set():
+            return
+        if status:
+            self._report(f"Microphone stream: {status}")
+        now = time.monotonic()
+        with self._lock:
+            if self._muted(now):
+                return
+        try:
+            self._pcm.put_nowait((now, bytes(indata)))
+        except queue.Full:
+            self._report("Microphone queue overflow; stale audio will be discarded")
+
+    def _input_finished(self) -> None:
+        if not self._stop.is_set():
+            self._report("Microphone stream stopped unexpectedly; check the USB device")
+            self._stop.set()
+
+    def _listen_worker(self) -> None:
+        try:
+            while not self._stop.is_set():
+                try:
+                    timestamp, pcm = self._pcm.get(timeout=0.1)
+                except queue.Empty:
+                    continue
+                with self._lock:
+                    muted = self._muted(timestamp) or time.monotonic() - timestamp > 0.5
+                    utterance = self._vad.feed(pcm, muted=muted)
+                    self._listening = self._vad.active
+                    if utterance is not None:
+                        self._transcribing = True
+                        self._ready = False
+                        generation = self._input_generation
+                if utterance is None:
+                    continue
+                try:
+                    with tempfile.TemporaryDirectory(prefix="kimgane-stt-") as directory:
+                        wav_path = Path(directory) / "utterance.wav"
+                        with wave.open(str(wav_path), "wb") as output:
+                            output.setnchannels(1)
+                            output.setsampwidth(2)
+                            output.setframerate(16000)
+                            output.writeframes(utterance)
+                        text = self.transcribe_wav(wav_path)
+                    with self._lock:
+                        if (text and not self._stop.is_set()
+                                and generation == self._input_generation):
+                            self.on_text(text)
+                finally:
+                    with self._lock:
+                        self._transcribing = False
+                        self._listening = False
+                        self._vad.reset()
+                        self._mute_until = max(self._mute_until, time.monotonic())
+                        self._ready_pending_at = time.monotonic() + 0.15 if self._input_online else None
+        except _Cancelled:
+            pass
+        except Exception as exc:
+            self._report(f"Audio input/STT failed: {exc}")
+            self._stop.set()
+
+    def transcribe_wav(self, wav_path: str | Path) -> str:
+        wav_path = Path(wav_path).expanduser().resolve()
+        with wave.open(str(wav_path), "rb") as source:
+            if (source.getnchannels(), source.getsampwidth(), source.getframerate()) != (1, 2, 16000):
+                raise ValueError("STT WAV must be mono, 16-bit PCM, 16000 Hz")
+            if not 0 < source.getnframes() <= 15 * 16000:
+                raise ValueError("STT WAV must contain between 0 and 15 seconds of audio")
+        with tempfile.TemporaryDirectory(prefix="kimgane-transcript-") as directory:
+            output_base = Path(directory) / "transcript"
+            with self._lock:
+                prompt = self._prompt if self._prompt_supported else None
+            command = build_whisper_command(self.config, wav_path, output_base, prompt=prompt)
+            self._run(command, self.config["stt_timeout_s"])
+            transcript = output_base.with_suffix(".txt")
+            if not transcript.is_file():
+                raise RuntimeError("whisper-cli completed without its expected transcript file")
+            text = transcript.read_text(encoding="utf-8-sig").strip()
+            return " ".join(text.split())
+
+    def _speak_worker(self) -> None:
+        try:
+            while not self._stop.is_set():
+                try:
+                    job = self._speech.get(timeout=0.05)
+                except queue.Empty:
+                    with self._lock:
+                        pending = (not self._speaking and not self._transcribing and not self._listening
+                                   and self._ready_pending_at is not None
+                                   and time.monotonic() >= self._ready_pending_at)
+                        if pending:
+                            self._speaking = True
+                    if pending:
+                        self._finish_output()
+                    continue
+                try:
+                    with self._lock:
+                        queued_at = self._queued_at.pop(job, time.monotonic())
+                    print(f"TTS 대기 | {(time.monotonic() - queued_at) * 1000:.0f}ms", flush=True)
+                    for text in ((job,) if isinstance(job, str) else job):
+                        self._play(text)
+                except _Cancelled:
+                    break
+                except Exception as exc:
+                    print(f"⚠️ [TTS 오류]: {exc}")
+                    self._report(f"Audio output/TTS failed: {exc}")
+                finally:
+                    with self._lock:
+                        self._pending_texts.discard(job)
+                        self._queued_at.pop(job, None)
+                    self._finish_output()
+        except _Cancelled:
+            pass
+
+    def _finish_output(self):
+        # Keep capture muted through TTS tail, ready tone and a short tone tail.
+        deadline = time.monotonic() + self.config["echo_cooldown_ms"] / 1000
+        while time.monotonic() < deadline:
+            if self._stop.wait(0.02):
+                raise _Cancelled()
+            if not self._speech.empty():
+                return  # A queued announcement continues the same speaking turn.
+        if not self._speech.empty():
+            return
+        try:
+            with self._lock:
+                play_tone = self.config["ready_tone"] and self._tone_enabled and self._input_online
+            if play_tone:
+                self._play_ready_tone()
+            if self._stop.wait(0.05):
+                raise _Cancelled()
+        except _Cancelled:
+            raise
+        except Exception as exc:
+            self._report(f"Ready tone failed: {exc}")
+        with self._lock:
+            if not self._speech.empty():
+                return
+            self._vad.reset()
+            while not self._pcm.empty():
+                try:
+                    self._pcm.get_nowait()
+                except queue.Empty:
+                    break
+            self._mute_until = time.monotonic()
+            self._speaking = False
+            self._ready = self._input_online
+            self._ready_pending_at = None
+        print("음성 입력 준비" if self._input_online else "마이크 연결 대기 | 음성 출력은 유지합니다.", flush=True)
+
+    def _play_ready_tone(self):
+        self._run(self._playback_command(self.prepare_ready_tone()), 3)
+
+    def prepare_ready_tone(self):
+        """Version and parameters prevent reuse of the old, quieter 80ms file."""
+        duration = self.config["ready_tone_ms"]
+        amplitude = self.config["ready_tone_amplitude"]
+        path = self.ready_tone_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if not valid_wav(path):
+            samples = array("h")
+            count = 16 * duration  # 16kHz, mono PCM16; no TTS synthesis.
+            for n in range(count):
+                fade = min(1, n / 160, (count - 1 - n) / 160)
+                samples.append(int(amplitude * fade * math.sin(2 * math.pi * 880 * n / 16000)))
+            if sys.byteorder != "little":
+                samples.byteswap()
+            with tempfile.TemporaryDirectory(prefix="tone-", dir=path.parent) as directory:
+                temporary = Path(directory) / "tone.wav"
+                with wave.open(str(temporary), "wb") as output:
+                    output.setparams((1, 2, 16000, 0, "NONE", "not compressed"))
+                    output.writeframes(samples.tobytes())
+                temporary.replace(path)
+        return path
+
+    def ready_tone_path(self):
+        duration = self.config["ready_tone_ms"]
+        amplitude = self.config["ready_tone_amplitude"]
+        return Path(self.config["cache_dir"]).expanduser() / f"input-ready-v2-{duration}-{amplitude}.wav"
+
+    def _playback_command(self, path):
+        command = [self.config["playback_executable"], "-q"]
+        if self.config["output_device"] is not None:
+            command.extend(["-D", str(self.config["output_device"])])
+        return command + [str(path)]
+
+    def _play(self, text: str) -> None:
+        target = self.prepare_speech(text)
+        print(f"TTS 재생 요청 | {text}", flush=True)
+        self._run(self._playback_command(target), self.config["tts_timeout_s"])
+
+    def prepare_speech(self, text: str) -> Path:
+        """Build a cached WAV without playback, microphone, camera or BLE."""
+        if self._stop.is_set():
+            raise _Cancelled()
+        if not text.strip() or len(text) > 300:
+            raise ValueError("Speech text must contain 1..300 characters")
+        started = time.monotonic()
+        cfg = self.config
+        target = tts_cache_path(cfg, text)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        cached = valid_wav(target)
+        if not cached:
+            with tempfile.TemporaryDirectory(prefix="tts-", dir=target.parent) as directory:
+                temporary = Path(directory) / "speech.wav"
+                
+                self._init_supertonic()
+                if self._stop.is_set():
+                    raise _Cancelled()
+                try:
+                    wav_data, duration = self._tts_engine.synthesize(
+                        text, voice_style=self._tts_style, lang="ko"
+                    )
+                except TypeError:
+                    wav_data, duration = self._tts_engine.synthesize(
+                        text, voice_style=self._tts_style
+                    )
+                self._tts_engine.save_audio(wav_data, str(temporary))
+                
+                with wave.open(str(temporary), "rb") as wav:
+                    if wav.getnframes() == 0:
+                        raise RuntimeError("Supertonic TTS generated an empty WAV")
+                temporary.replace(target)
+                
+        print(f"TTS {'캐시' if cached else '합성'} | {(time.monotonic() - started) * 1000:.0f}ms | {text}", flush=True)
+        return target
+
+    def _run(self, command: list[str], timeout: float, input_text: str | None = None) -> str:
+        with self._lock:
+            if self._stop.is_set():
+                raise _Cancelled()
+            process = subprocess.Popen(command, stdin=subprocess.PIPE if input_text is not None else subprocess.DEVNULL,
+                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                       text=True, encoding="utf-8", errors="replace")
+            self._processes.add(process)
+        deadline = time.monotonic() + timeout
+        try:
+            pending_input = input_text
+            while True:
+                if self._stop.is_set():
+                    raise _Cancelled()
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(f"{Path(command[0]).name} exceeded {timeout:g}s")
+                try:
+                    stdout, stderr = process.communicate(input=pending_input, timeout=0.1)
+                    break
+                except subprocess.TimeoutExpired:
+                    pending_input = None
+            if self._stop.is_set():
+                raise _Cancelled()
+            if process.returncode:
+                detail = (stderr or stdout).strip()[-1000:]
+                raise RuntimeError(f"{Path(command[0]).name} exited {process.returncode}: {detail}")
+            return stdout
+        finally:
+            if process.poll() is None:
+                process.kill()
+            process.communicate()
+            with self._lock:
+                self._processes.discard(process)
+
+    def close(self) -> None:
+        self._stop.set()
+        if self._stream is not None:
+            try:
+                self._stream.abort()
+            except Exception as exc:
+                self._report(f"Microphone stop failed: {exc}")
+            finally:
+                try:
+                    self._stream.close()
+                except Exception as exc:
+                    self._report(f"Microphone close failed: {exc}")
+                self._stream = None
+        with self._lock:
+            for process in self._processes:
+                if process.poll() is None:
+                    try:
+                        process.terminate()
+                    except ProcessLookupError:
+                        pass
+        for worker in self._threads:
+            if worker is not threading.current_thread():
+                worker.join(timeout=5)
+                if worker.is_alive():
+                    self._report(f"Audio worker did not stop: {worker.name}")
+        with self._lock:
+            self._speaking = self._listening = self._transcribing = False
+        self._started = False

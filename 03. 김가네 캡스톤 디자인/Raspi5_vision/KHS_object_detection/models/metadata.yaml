@@ -1,0 +1,38 @@
+description: Ultralytics best model trained on /content/dataset/Merged_Dataset/data.yaml
+author: Ultralytics
+date: '2026-10-17T00:22:20.229835+09:00'
+version: 8.4.177
+license: AGPL-3.0 License (https://ultralytics.com/license)
+docs: https://docs.ultralytics.com
+stride: 32
+task: detect
+head: Detect
+batch: 1
+imgsz:
+- 640
+- 640
+names:
+  0: Earbud
+  1: bottle
+  2: cell phone
+  3: cup
+  4: remote
+  5: Glasses
+  6: Medicine
+  7: key
+  8: Pen
+  9: Tumbler
+  10: Wallet
+args:
+  data: data.yaml
+  name: hailo10h
+  fraction: 0.1
+  conf: null
+  iou: 0.7
+  quantize: 8
+  simplify: true
+channels: 3
+end2end: false
+hailo_arch: hailo10h
+nms: true
+semantic_baked: false

@@ -1,0 +1,10 @@
+bottle
+cup
+mouse
+remote
+Glasses
+Pen
+cell phone
+Sunglasses
+Tumbler
+Wallet

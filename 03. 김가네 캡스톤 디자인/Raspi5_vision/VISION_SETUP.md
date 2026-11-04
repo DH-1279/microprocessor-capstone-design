@@ -99,6 +99,90 @@ timeout 60s python -u tools/check_hailo_camera.py
 - 모든 모델은 같은 RGB 프레임에서 실행한다. Hailo 입력에 추가한 여백을 제거한 뒤 원본 영상의 정규화 좌표로 복구한다.
 - 호스트에서는 좌표 복원, 잘못된 NMS 출력 거부, 손 선택, 최신 프레임 교체, SDK 대역을 통한 호출을 시험했다. **실제 CSI 카메라·Hailo-10H·장갑을 낀 손에 대한 인식률과 FPS는 아직 측정하지 않았다.**
 
+### 2026-10-17 HDMI 모니터에서 물체 탐지 확인
+
+Pi에 연결한 모니터에 바탕화면이 보이는 환경에서, **그 바탕화면의 터미널**을 열어 실행한다. PuTTY SSH 터미널의 화면과 구분한다. 기존 카메라 시험이 실행 중이면 먼저 종료한다.
+
+카메라 영상만 확인하려면 `rpicam-hello -t 0`으로 보고 Ctrl+C로 종료한다. 아래 점검 도구를 실행하기 전에 카메라 프로그램을 닫는다.
+
+`tools/check_hailo_camera.py --preview`는 공통 HailoDetector와 CameraSource만 사용해 물체 박스·라벨·점수를 표시한다. 손 `.task`, 음성, 목표 선택, BLE는 필요하지 않다. 기존 텍스트 모드는 기본 10프레임이며, 미리보기는 기본적으로 종료 키를 누를 때까지 계속한다. `--frames 100`처럼 지정하면 미리보기에도 프레임 제한을 적용할 수 있다.
+
+프로젝트 폴더에서 실행할 명령이다. `/tmp`가 비었어도 실행할 수 있도록, 16일에 실측한 해수 모델과 라벨을 고정 커밋에서 다시 준비한다. 원격 브랜치를 fetch하여 해당 커밋이 로컬 Git에 있어야 한다.
+
+```bash
+source .venv/bin/activate
+mkdir -p /tmp/kimgane-khs-check
+git show 'd96d859621cf353c0c9aca11e521626319d2a93a:03. 김가네 캡스톤 디자인/Raspi5_vision/KHS_object_detection/best_hailo_model/best.hef' > /tmp/kimgane-khs-check/best.hef
+git show 'd96d859621cf353c0c9aca11e521626319d2a93a:03. 김가네 캡스톤 디자인/Raspi5_vision/KHS_object_detection/labels.json' | python3 -c 'import json,sys; d=json.load(sys.stdin); print("\n".join(d[str(i)] for i in range(len(d))))' > /tmp/kimgane-khs-check/labels.txt
+python -u tools/check_hailo_camera.py --preview
+```
+
+화면을 보며 **표시된 이름과 실제 물체가 맞는지, 박스가 해당 물체 위치에 맞는지** 확인한다.
+
+영상 창을 클릭하고 `q` 또는 Esc를 누르거나, 실행한 터미널에서 Ctrl+C를 누르면 종료한다.
+
+미리보기는 0.3초의 텍스트 모드 대기를 넣지 않는다. 화면의 `detect ... ms`는 탐지 함수의 처리 시간이며 전체 영상 FPS가 아니다. 원본 RGB는 추론에 사용하고, 표시용 사본만 BGR로 변환해 그리므로 물체 입력에 박스가 섞이지 않는다.
+
+Linux에서 `DISPLAY`·`WAYLAND_DISPLAY`가 모두 없으면 바탕화면 터미널에서 실행하도록 안내한다. OpenCV가 GUI 없는 빌드이면 모델을 열기 전에 오류를 표시한다. 이 경우 다음 정보부터 확인하고 가상환경의 OpenCV를 임의로 삭제·재설치하지 않는다.
+
+```bash
+python -c "import cv2; print(cv2.__version__, cv2.__file__); print(cv2.getBuildInformation())"
+```
+
+호스트에서 도구·기존 비전 테스트 42개와 subtest 29개, Ruff·Mypy 검사를 통과했다. 이후 아래 11클래스 모델의 실제 Pi 실행과 출력 예외를 확인했다. GUI API는 [OpenCV HighGUI 공식 문서](https://docs.opencv.org/4.x/d7/dfc/group__highgui.html)를 참고한다.
+
+### 2026-10-17 새 11클래스 모델과 연속 미리보기 수정
+
+해수 커밋 `a0b2d5da318fab22da67dbc5f10895db9f907689`은 HEF·metadata·NMS 설정·라벨을 교체했다. 새 HEF는 4,530,176바이트이며 SHA-256은 `350fc70ae9ee54325209a1facd2c0bb20da4af9d21d0772f694b97789610f09d`다. 바이너리 내부 NMS 클래스 수와 metadata·라벨의 11개 순서가 일치함을 확인했다.
+
+```text
+Earbud, bottle, cell phone, cup, remote, Glasses,
+Medicine, key, Pen, Tumbler, Wallet
+```
+
+사용자 Pi의 `parse-hef`는 HAILO15H/HAILO10H 호환, NHWC UINT8 640×640×3 입력과 FLOAT32 HAILO NMS BY CLASS 11개 출력을 표시했다. 모델 생성과 실제 카메라 추론도 진행됐다. 첫 탐지 함수 처리 시간은 30.1ms, 이후 출력된 표본은 약 13ms였다. PuTTY에서 `DISPLAY=:0`, 사용자 `XDG_RUNTIME_DIR`를 지정하여 실행했으며, Qt 폰트 경고 후에도 모델·카메라 초기화와 추론이 계속됐다.
+
+390프레임 로그 이후 다음 원시 출력 때문에 범위 검사에서 중단됐다. 프레임 수 제한이나 `parse-hef`에만 적용한 20초 timeout으로 끝난 것이 아니다.
+
+```text
+Earbud: [0.13029966, 0.00030338764, 0.87358201, 0.99982202, 1.0005449]
+ValueError: Detection confidence must be finite and within 0..1
+```
+
+마지막 값이 신뢰도다. 1을 넘은 출력을 관측했지만, 이 값을 만든 학습·변환·실행 단계의 정확한 원인은 아직 확정하지 않았다. 영상에 나온 물체와 실제 박스의 일치 여부도 별도 확인이 필요하다.
+
+미리보기 도구는 `--preview`에서 결과 검증 `ValueError`가 나면 **그 프레임의 탐지 결과 전체를 폐기**하고, 원본 영상에 빨간 `INVALID OUTPUT - detections discarded` 경고를 표시하며 다음 프레임으로 계속한다. 이전 프레임의 박스를 재사용하거나 범위 밖 신뢰도를 1로 보정하지 않는다. 정상 출력이 돌아오면 정상 박스를 다시 표시한다. 오류 횟수를 집계하고 원시 표본 로그는 최대 2초마다 출력한다. 기본 미리보기에는 프레임 수 제한이 없으며 q·Esc·Ctrl+C로 종료한다.
+
+이 동작은 손·음성·BLE 없이 영상을 관찰하는 도구에 한정된다. 공통 NMS 검증은 유지하며 텍스트 점검은 계속 오류를 전파한다. 장치 오류·카메라 실패까지 무시하는 방식도 아니다. 실제 오류 행을 사용한 폐기·복구 테스트와 기존 비전 테스트 총 47개 및 subtest 29개, Ruff·Mypy 검사를 통과했다. 수정 후 Pi에서의 장시간 실행은 추가 확인해야 한다.
+
+위 새 모델과 라벨을 `$HOME/.cache/kimgane-haptic/khs11-a0b2d5d`에 준비한 경우, 같은 PuTTY 터미널의 화면 연결 설정을 유지하고 다음 명령으로 실행한다.
+
+```bash
+python -u tools/check_hailo_camera.py --preview \
+  --model "$HOME/.cache/kimgane-haptic/khs11-a0b2d5d/best.hef" \
+  --labels "$HOME/.cache/kimgane-haptic/khs11-a0b2d5d/labels.txt"
+```
+
+### 2026-10-17 중앙 크롭으로 좁아 보이는 화각 조정
+
+기존 Pi 로그는 `1536×864` 센서 모드에서 `640×480` 프레임을 출력했다. 앞서 사용자가 제공한 IMX708 모드 목록에서 해당 모드의 센서 영역은 `(768, 432, 3072, 1728)`이며 전체 `(0, 0, 4608, 2592)`보다 좁다. 또한 16:9 센서 영상을 4:3으로 비율을 유지해 출력하면 가로 영역이 더 잘릴 수 있다. 명시적인 디지털 줌 명령이 없어도 센서 모드 선택 때문에 확대된 것처럼 보일 수 있다.
+
+`--full-fov`를 추가하면 Picamera2의 `sensor_modes`에서 `crop_limits` 면적이 최대인 모드를 먼저 찾고, 요청한 FPS를 지원하는 것 중 가장 작은 센서 해상도를 사용한다. 보고된 IMX708 모드 표와 기본 15FPS에서는 `2304×1296` 모드를 선택한다. `4608×2592` 원본 모드를 매번 읽을 필요는 없다. 최대 영역 모드가 요청 FPS를 지원하지 않으면 중앙 크롭 모드로 몰래 전환하지 않고 오류를 낸다.
+
+이 옵션은 센서 영역의 화면 비율도 유지하므로 해당 카메라에서는 출력이 `640×360`이 된다. 구성 후 최대 `ScalerCrop`을 요청하고 선택된 센서 모드·crop·출력 크기를 `FULL FOV` 로그로 보여준다. HEF 입력은 기존 640×640으로 유지하며 공통 letterbox 전처리를 사용한다. 옵션을 생략하면 기존 640×480 자동 센서 선택을 유지한다.
+
+```bash
+python -u tools/check_hailo_camera.py --preview --full-fov \
+  --model "$HOME/.cache/kimgane-haptic/khs11-a0b2d5d/best.hef" \
+  --labels "$HOME/.cache/kimgane-haptic/khs11-a0b2d5d/labels.txt"
+```
+
+예상 시작 정보는 센서 `(2304, 1296)`, crop `(0, 0, 4608, 2592)`, 출력 `(640, 360)`이다. 실제 Pi에서 이 로그와 영상을 확인한다. 카메라 위치를 고정한 채 옵션 유무에 따라 화면 가장자리에 보이는 물체를 비교하면 된다. 렌즈 자체가 담지 못한 범위를 소프트웨어로 만들어낼 수는 없으므로, 센서 전체 영역을 써도 좁으면 설치 거리를 늘리는 등의 배치를 검토한다.
+
+이번 옵션은 카메라·HAT 단독 점검용이다. 공통 MVP 설정은 변경하지 않았으며, 이후 전체 실행기에 16:9 출력을 적용하려면 `vision.width/height`와 `controller.image_aspect`도 함께 맞춰야 한다. 호스트의 센서 모드 선택·카메라 자원 정리·기존 비전·미리보기 테스트 55개와 subtest 29개 및 Ruff·Mypy 검사를 통과했다. 수정 후 실제 Pi의 화각 변화는 아직 미확인이다.
+
+API 근거: [Picamera2 공식 매뉴얼](https://datasheets.raspberrypi.com/camera/picamera2-manual.pdf)의 sensor modes, sensor configuration, ScalerCropMaximum 설명.
+
 ## 1. Pi OS와 HAT 확인
 
 공식 가이드 기준은 **Raspberry Pi 5 + 64-bit Raspberry Pi OS Trixie**다. 먼저 다음 정보부터 확인한다.

@@ -1,0 +1,51 @@
+# Raspberry Pi BLE v2 송신부
+
+ESP의 `ble_final_receiver`용 송신부다. `KHS_KMJ_vision/detector.py`를 실행하면 내부 BLE 작업도 자동 시작한다. 기존 `haptic_mvp` BLE v1과 함께 사용하지 않는다.
+
+개인 QA 브랜치에서는 ESP 미연결 상태로도 앱을 실행하며 **자동 연결·재연결**한다. 새 손 프레임으로 자동 재개하되 명시적 stop과 이전 완료 이벤트는 보존/차단한다. 수동 점검은 `--manual-reconnect`다. [10월 30일 QA 변경·시험 절차](../../docs/2026-10-30_DH_QA_음성입력_BLE자동연결.md)를 우선 참고한다.
+
+11월 2일 QA 수정에서는 연결 상태의 반복 음성·준비음을 없애고, 실제 연결·재연결 완료 시 **전체 모터 200ms 한 번**으로 알린다. 자세한 내용은 [마이크 자동 복구·BLE 연결 알림](../../docs/2026-11-02_DH_QA_마이크자동복구_BLE연결알림.md)을 참고한다. `check_link`에서는 연결 진동을 보내지 않는다.
+
+현재 기본 모드는 **mode 3 방향 안내**다. 사용자가 실기기 시험으로 정한 운영값은 손바닥/목표 중심 **75px 이내, 8개 연속 유효 프레임**이다. 아래 실행 옵션으로 지정한다. 다섯 채널 duty 255로 350ms씩 두 번 울린다. mode 2 다중 주기도 유지한다. ESP가 이미 `caps=07`이면 이번 QA 변경으로 재업로드할 필요는 없다. 구형 수신기는 초기 STOP 이후 기능 확인에서 차단한다.
+
+- [현재 규격·획득 조건·업로드 및 실기기 시험](../../docs/2026-10-29_DH_도달알림_다섯손가락_BLE.md)
+
+- [설치·실행·해수 코드 연결 방법](../../docs/2026-10-28_DH_라즈베리_BLE_송신부.md)
+- [ESP32 16바이트 규격](../../docs/2026-10-27_DH_ESP32_BLE_송수신규격.md)
+
+`Raspi5_vision`에서 기존 가상환경을 활성화한 뒤 실행한다.
+
+```bash
+cd "$HOME/Desktop/kimGA_raspi/microprocessor-capstone-design/03. 김가네 캡스톤 디자인/Raspi5_vision"
+source .venv/bin/activate
+export DISPLAY=:0
+python -u KHS_KMJ_vision/detector.py --address 9C:CC:01:82:75:8A --mode 3 --reach-px 75 --reach-frames 8
+```
+
+코드 기본값은 여전히 50px/5프레임이며 명령 옵션이 우선한다. PuTTY에서 연결된 모니터로 창을 표시하는 실제 실행 기준은 위 명령이다. 처음 설치할 때 필요한 Python 의존성은 `python -m pip install -r ble_sender/requirements.txt`로 설치한다.
+
+실행 중 터미널 명령:
+
+```text
+mode 2
+mode 3
+status
+stop
+resume
+reconnect
+quit
+```
+
+ESP 연결 후 시동어·목표 선택을 기다리며, 락온한 목표와 이번 프레임의 유효한 손이 있을 때만 거리 안내한다. 도달 시 거리 안내를 완료 알림으로 교체하고 한 회 실행 후 정지한다. 취소·손 관측 상실·종료는 정지한다. 물체 미검출만으로 잠금 위치 안내를 끄지 않는다. `quit`는 BLE와 detector를 함께 종료한다.
+
+안내 중 통신이 끊기면 진동을 정지하고 영상·음성을 유지하면서 자동 재연결한다. 직접 stop한 상태는 재연결로 해제하지 않는다. `--manual-reconnect`에서는 기존 reconnect/resume 점검 흐름을 사용한다.
+
+`--dry-run`은 BLE 없이 영상과 패킷 매핑을 검사하고, `--no-ble`은 영상·음성만 실행한다. ESP의 `DRY_RUN` 펌웨어 설정과는 다르다. 독립 모터 시험은 `python -m ble_sender --allow-test`로 가능하며, detector와 동시에 켜지 않는다.
+
+연결·GATT·초기 STOP만 먼저 확인하려면 `python -m ble_sender.check_link --address ESP주소`를 실행한다. 카메라와 음성은 열지 않고 STOP과 상태 읽기만 수행한 뒤 종료한다. 초기 I/O는 5초, 안내 중 쓰기 응답은 1초로 제한한다. 일반 안내 TTL은 500ms, 획득 이벤트는 1000ms이며 ACK 대기가 모터 출력 시간을 연장하지 않는다.
+
+```bash
+python -m unittest discover -s ble_sender/tests -v
+```
+
+`HAPTIC_V2_LIB`를 지정하면 실제 ESP C++ 패턴 엔진과의 패킷 호환성 검사도 실행한다. 지정하지 않으면 네이티브 엔진 검사를 건너뛴다. Pi와 ESP의 무선 연결·모터는 실제 기기로 별도 확인해야 한다.
